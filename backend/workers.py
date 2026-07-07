@@ -1,0 +1,1009 @@
+"""
+AI Saham Indonesia — Background Workers & Jobs
+
+Modul ini mendefinisikan pekerjaan background (cron jobs) yang dijalankan oleh
+APScheduler, serta fungsi pembantu untuk inisialisasi awal database (seeding).
+"""
+
+import asyncio
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
+
+from loguru import logger
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from backend.config import settings
+from backend.db.postgres import (
+    async_session,
+    Saham,
+    Fundamental,
+    Makro,
+    Berita,
+    ScoringMingguan,
+    Alert,
+)
+from backend.data.collectors.berita_collector import collect_berita_batch, collect_berita_pasar
+from backend.data.collectors.fundamental_collector import collect_fundamental_batch, collect_last_prices
+from backend.data.collectors.xbrl_collector import collect_xbrl_fundamental
+from backend.data.collectors.makro_collector import collect_makro
+from backend.data.preprocessors.data_cleaner import clean_berita, normalize_fundamental, hitung_sentimen_sederhana, hitung_sentimen_qwen
+from backend.rag.indexer import index_batch_berita, index_laporan_keuangan
+from backend.agents.scoring_agent import jalankan_scoring, scrape_and_save_fundamental_for_emiten
+from backend.utils.ticker import normalize_market
+import backend.system_notifier as notifier
+
+_WIB = timezone(timedelta(hours=7))
+
+# Lock global yang dipakai SEMUA proses yang memanggil scoring_agent (Ollama LLM lokal).
+# Qwen3 via Ollama cuma satu instance — kalau scoring mingguan terjadwal dan
+# "Analyze" on-demand jalan bersamaan, request akan saling rebutan/timeout.
+# Dengan lock ini keduanya otomatis dijalankan bergantian (antri), bukan paralel.
+scoring_lock = asyncio.Lock()
+
+# Daftar default saham Bluechip Indonesia (LQ45 / Kompas100 teratas)
+SAHAM_DEFAULT = [
+    {"kode": "BBCA", "nama_perusahaan": "Bank Central Asia Tbk", "sektor": "Financials", "sub_sektor": "Banks"},
+    {"kode": "BBRI", "nama_perusahaan": "Bank Rakyat Indonesia (Persero) Tbk", "sektor": "Financials", "sub_sektor": "Banks"},
+    {"kode": "BMRI", "nama_perusahaan": "Bank Mandiri (Persero) Tbk", "sektor": "Financials", "sub_sektor": "Banks"},
+    {"kode": "BBNI", "nama_perusahaan": "Bank Negara Indonesia (Persero) Tbk", "sektor": "Financials", "sub_sektor": "Banks"},
+    {"kode": "TLKM", "nama_perusahaan": "Telkom Indonesia (Persero) Tbk", "sektor": "Infrastructure", "sub_sektor": "Telecommunication"},
+    {"kode": "ASII", "nama_perusahaan": "Astra International Tbk", "sektor": "Consumer Discretionary", "sub_sektor": "Automotive"},
+    {"kode": "UNVR", "nama_perusahaan": "Unilever Indonesia Tbk", "sektor": "Consumer Staples", "sub_sektor": "Personal Care Product"},
+    {"kode": "ADRO", "nama_perusahaan": "Adaro Energy Indonesia Tbk", "sektor": "Energy", "sub_sektor": "Coal"},
+    {"kode": "GGRM", "nama_perusahaan": "Gudang Garam Tbk", "sektor": "Consumer Staples", "sub_sektor": "Tobacco"},
+    {"kode": "KLBF", "nama_perusahaan": "Kalbe Farma Tbk", "sektor": "Healthcare", "sub_sektor": "Pharmaceuticals"},
+    {"kode": "ANTM", "nama_perusahaan": "Aneka Tambang Tbk", "sektor": "Basic Materials", "sub_sektor": "Metals & Mining"},
+    {"kode": "PGAS", "nama_perusahaan": "Perusahaan Gas Negara Tbk", "sektor": "Energy", "sub_sektor": "Utilities"},
+    {"kode": "ICBP", "nama_perusahaan": "Indofood CBP Sukses Makmur Tbk", "sektor": "Consumer Staples", "sub_sektor": "Processed Foods"},
+    {"kode": "INDF", "nama_perusahaan": "Indofood Sukses Makmur Tbk", "sektor": "Consumer Staples", "sub_sektor": "Processed Foods"},
+    {"kode": "UNTR", "nama_perusahaan": "United Tractors Tbk", "sektor": "Industrials", "sub_sektor": "Heavy Equipment"},
+    {"kode": "PTBA", "nama_perusahaan": "Bukit Asam Tbk", "sektor": "Energy", "sub_sektor": "Coal"},
+    {"kode": "MEDC", "nama_perusahaan": "Medco Energi Internasional Tbk", "sektor": "Energy", "sub_sektor": "Oil & Gas"},
+    {"kode": "BRIS", "nama_perusahaan": "Bank Syariah Indonesia Tbk", "sektor": "Financials", "sub_sektor": "Banks"},
+    {"kode": "AMRT", "nama_perusahaan": "Sumber Alfaria Trijaya Tbk", "sektor": "Consumer Staples", "sub_sektor": "Supermarkets & Convenience Stores"},
+    {"kode": "MDKA", "nama_perusahaan": "Merdeka Copper Gold Tbk", "sektor": "Basic Materials", "sub_sektor": "Metals & Mining"},
+]
+
+
+# ============================================================
+# Helper Functions — Format Teks Laporan Keuangan untuk RAG
+# ============================================================
+
+def _format_rupiah(value: float | int | None) -> str:
+    """
+    Format angka Rupiah menjadi triliun/miliar/juta untuk keterbacaan natural.
+    Contoh: 1_234_567_890_000 -> "Rp 1.23 triliun"
+    """
+    if value is None:
+        return "tidak tersedia"
+    try:
+        v = float(value)
+    except (ValueError, TypeError):
+        return "tidak tersedia"
+
+    abs_val = abs(v)
+    sign = "-" if v < 0 else ""
+    if abs_val >= 1e12:
+        return f"{sign}Rp {abs_val/1e12:.2f} triliun"
+    if abs_val >= 1e9:
+        return f"{sign}Rp {abs_val/1e9:.2f} miliar"
+    if abs_val >= 1e6:
+        return f"{sign}Rp {abs_val/1e6:.2f} juta"
+    return f"{sign}Rp {abs_val:,.0f}"
+
+
+def _buat_teks_laporan_keuangan(
+    kode: str,
+    nama_perusahaan: str | None,
+    sektor: str | None,
+    xbrl_data: dict,
+) -> str:
+    """
+    Susun teks naratif ringkas dari data XBRL untuk di-embed ke ChromaDB.
+
+    Teks ditulis dengan gaya semi-naratif Bahasa Indonesia agar embedding BGE-M3
+    bisa menangkap konteks finansial dengan baik, dan chatbot RAG bisa
+    me-retrieve serta menjawab pertanyaan kualitatif tentang laporan keuangan.
+    """
+    tahun = xbrl_data.get("tahun", "tidak diketahui")
+    periode = xbrl_data.get("periode", "Audit")
+    nama = nama_perusahaan or kode
+    sektor_txt = sektor or "tidak diketahui"
+
+    aset = _format_rupiah(xbrl_data.get("total_assets"))
+    liabilitas = _format_rupiah(xbrl_data.get("total_liabilities"))
+    ekuitas = _format_rupiah(xbrl_data.get("total_equity"))
+    laba = _format_rupiah(xbrl_data.get("net_profit"))
+
+    roe = xbrl_data.get("roe")
+    der = xbrl_data.get("der")
+    eps = xbrl_data.get("eps")
+
+    roe_txt = f"{roe:.2f}%" if roe is not None else "tidak tersedia"
+    der_txt = f"{der:.2f}x" if der is not None else "tidak tersedia"
+    eps_txt = f"Rp {eps:,.2f}" if eps is not None else "tidak tersedia"
+
+    # Interpretasi sederhana untuk membantu chatbot memberikan konteks kualitatif
+    interpretasi = []
+    if roe is not None:
+        if roe >= 15:
+            interpretasi.append(f"ROE {roe:.2f}% tergolong tinggi, menandakan efisiensi modal yang baik.")
+        elif roe >= 8:
+            interpretasi.append(f"ROE {roe:.2f}% tergolong moderat.")
+        elif roe > 0:
+            interpretasi.append(f"ROE {roe:.2f}% tergolong rendah.")
+        else:
+            interpretasi.append(f"ROE {roe:.2f}% negatif, perusahaan mengalami kerugian relatif terhadap ekuitas.")
+
+    if der is not None:
+        if der <= 1.0:
+            interpretasi.append(f"DER {der:.2f}x rendah, struktur permodalan konservatif.")
+        elif der <= 2.0:
+            interpretasi.append(f"DER {der:.2f}x moderat.")
+        else:
+            interpretasi.append(f"DER {der:.2f}x tinggi, perusahaan memiliki leverage utang yang signifikan.")
+
+    interpretasi_str = " ".join(interpretasi) if interpretasi else ""
+
+    teks = (
+        f"Laporan Keuangan {nama} ({kode}) — Periode {periode} Tahun {tahun}. "
+        f"Sektor: {sektor_txt}. "
+        f"Total Aset perusahaan tercatat sebesar {aset}, "
+        f"dengan Total Liabilitas {liabilitas} dan Total Ekuitas {ekuitas}. "
+        f"Laba Bersih yang diatribusikan ke pemilik entitas induk adalah {laba}. "
+        f"Rasio finansial utama: ROE (Return on Equity) {roe_txt}, "
+        f"DER (Debt to Equity Ratio) {der_txt}, dan EPS (Earnings Per Share) {eps_txt}. "
+    )
+    if interpretasi_str:
+        teks += f"Interpretasi: {interpretasi_str}"
+
+    return teks.strip()
+
+
+async def seed_saham_if_empty() -> None:
+    """
+    Mengisi data master saham jika tabel saham masih kosong,
+    serta memastikan semua saham memiliki minimal data fundamental/harga historis.
+    """
+    import yfinance as yf
+    from sqlalchemy import func
+    from backend.data.collectors.fundamental_collector import _extract_info_value
+
+    logger.info("🌱 Mengecek master data saham...")
+    async with async_session() as session:
+        result = await session.execute(select(Saham).limit(1))
+        existing = result.scalars().first()
+
+        if not existing:
+            logger.info(f"🌱 Tabel saham kosong, mengisi dengan {len(SAHAM_DEFAULT)} saham default...")
+            for item in SAHAM_DEFAULT:
+                new_saham = Saham(
+                    kode=item["kode"],
+                    nama_perusahaan=item["nama_perusahaan"],
+                    sektor=item["sektor"],
+                    sub_sektor=item["sub_sektor"],
+                    tanggal_listing=None,
+                    market="IDX",
+                    is_watchlist=True,
+                )
+                session.add(new_saham)
+            await session.commit()
+            logger.info("🌱 Seeding saham selesai.")
+        else:
+            logger.info("🌱 Master data saham sudah terisi.")
+
+        # Memastikan kelengkapan data historis untuk setiap emiten WATCHLIST
+        # (saham hasil "Analyze" on-demand yang is_watchlist=False sengaja TIDAK
+        # ikut backfill otomatis ini — itu beban yang harus dihindari, lihat workers.py docstring)
+        logger.info("🌱 Mengecek kelengkapan data fundamental/harga historis emiten watchlist...")
+        res_saham = await session.execute(select(Saham).where(Saham.is_watchlist == True))
+        saham_list = res_saham.scalars().all()
+        
+        for s in saham_list:
+            cnt = await session.scalar(
+                select(func.count(Fundamental.id))
+                .where(Fundamental.kode_saham == s.kode)
+            )
+            if cnt < 5:
+                logger.info(f"⏳ Saham {s.kode} hanya memiliki {cnt} record fundamental. Mengambil histori dari yfinance...")
+                try:
+                    from backend.utils.ticker import get_yf_symbol
+                    ticker_symbol = get_yf_symbol(s.kode, s.market)
+                    ticker = yf.Ticker(ticker_symbol)
+                    
+                    info = {}
+                    try:
+                        info = ticker.info
+                    except Exception as info_err:
+                        logger.warning(f"⚠️ Gagal mengambil info yfinance untuk {s.kode}, lanjut fetch history: {info_err}")
+                        
+                    roe = _extract_info_value(info, "returnOnEquity")
+                    if roe is not None:
+                        roe = roe * 100.0
+                    eps = _extract_info_value(info, "trailingEps")
+                    pbv = _extract_info_value(info, "priceToBook")
+                    der_raw = _extract_info_value(info, "debtToEquity")
+                    der = der_raw / 100.0 if der_raw is not None else None
+                    market_cap_raw = _extract_info_value(info, "marketCap")
+                    market_cap = market_cap_raw / 1_000_000_000 if market_cap_raw else None
+                    pe_ratio = _extract_info_value(info, "trailingPE")
+                    div_yield = _extract_info_value(info, "dividendYield")
+                    if div_yield is not None:
+                        div_yield = div_yield * 100.0
+                        
+                    hist = ticker.history(period="15d")
+                    if not hist.empty:
+                        inserted = 0
+                        for ts, row in hist.iterrows():
+                            tanggal = ts.date()
+                            stmt_check = select(Fundamental).where(
+                                Fundamental.kode_saham == s.kode,
+                                Fundamental.tanggal == tanggal
+                            )
+                            res_check = await session.execute(stmt_check)
+                            if not res_check.scalar_one_or_none():
+                                new_fund = Fundamental(
+                                    kode_saham=s.kode,
+                                    tanggal=tanggal,
+                                    harga_terakhir=round(float(row["Close"]), 2),
+                                    volume=int(row["Volume"]),
+                                    roe=round(roe, 2) if roe is not None else None,
+                                    eps=round(eps, 2) if eps is not None else None,
+                                    pbv=round(pbv, 2) if pbv is not None else None,
+                                    der=round(der, 2) if der is not None else None,
+                                    market_cap=round(market_cap, 2) if market_cap is not None else None,
+                                    pe_ratio=round(pe_ratio, 2) if pe_ratio is not None else None,
+                                    dividend_yield=round(div_yield, 2) if div_yield is not None else None,
+                                )
+                                session.add(new_fund)
+                                inserted += 1
+                        await session.commit()
+                        logger.info(f"✅ Berhasil menyisipkan {inserted} baris histori untuk {s.kode}")
+                except Exception as e:
+                    logger.error(f"❌ Gagal mengambil histori yfinance untuk {s.kode}: {e}")
+
+
+async def get_or_create_saham(
+    kode: str,
+    market: str = "IDX",
+    nama_perusahaan: str | None = None,
+    sektor: str | None = None,
+    sub_sektor: str | None = None,
+    is_watchlist: bool | None = None,
+) -> Saham:
+    """
+    Cari baris `Saham` berdasarkan kode; buat baru jika belum ada.
+
+    Dipakai oleh alur "Analyze" (search saham asing/baru yang belum pernah
+    tersimpan) maupun "Tambah ke Watchlist". Baris yang dibuat lewat
+    `analyze_single_saham` default `is_watchlist=False` — supaya hasil
+    analisis sekali-jalan TIDAK ikut tersapu ke job terjadwal (scoring
+    mingguan, scrape harian, update harga 30 menit, dst). Baris hanya
+    menjadi bagian watchlist aktif ketika `is_watchlist=True` di-set
+    eksplisit lewat `set_watchlist_status()`.
+
+    Args:
+        kode: Kode saham (mis. "BBCA", "SNPS")
+        market: "IDX" | "NASDAQ" | "NYSE" | "ETF"
+        nama_perusahaan, sektor, sub_sektor: Metadata opsional (dari hasil
+            search di `simbol_referensi`, atau fallback ke kode itu sendiri)
+        is_watchlist: Jika None dan baris sudah ada, status existing TIDAK diubah.
+            Jika baris baru dibuat dan None, default False (ad-hoc, bukan watchlist).
+    """
+    kode_clean = kode.strip().upper()
+    market_clean = normalize_market(market)
+
+    async with async_session() as session:
+        result = await session.execute(select(Saham).where(Saham.kode == kode_clean))
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            if is_watchlist is not None and existing.is_watchlist != is_watchlist:
+                existing.is_watchlist = is_watchlist
+                await session.commit()
+                await session.refresh(existing)
+            return existing
+
+        new_saham = Saham(
+            kode=kode_clean,
+            nama_perusahaan=nama_perusahaan or kode_clean,
+            sektor=sektor or "Unknown",
+            sub_sektor=sub_sektor,
+            market=market_clean,
+            is_watchlist=is_watchlist if is_watchlist is not None else False,
+        )
+        session.add(new_saham)
+        await session.commit()
+        await session.refresh(new_saham)
+        logger.info(
+            f"➕ Saham baru terdaftar: {kode_clean} (market={market_clean}, "
+            f"is_watchlist={new_saham.is_watchlist})"
+        )
+        return new_saham
+
+
+async def set_watchlist_status(kode: str, status: bool) -> Saham | None:
+    """
+    Set `is_watchlist` untuk saham yang sudah terdaftar di tabel `Saham`.
+
+    status=True  -> mulai ikut dipantau scheduler (scoring mingguan, scrape
+                    harian, update harga 30 menit, pre-warming candle 15 menit).
+    status=False -> berhenti dipantau scheduler, tapi histori
+                    Fundamental/Berita/ScoringMingguan TIDAK dihapus.
+    """
+    kode_clean = kode.strip().upper()
+    async with async_session() as session:
+        result = await session.execute(select(Saham).where(Saham.kode == kode_clean))
+        saham_obj = result.scalar_one_or_none()
+        if not saham_obj:
+            return None
+        saham_obj.is_watchlist = status
+        await session.commit()
+        await session.refresh(saham_obj)
+        logger.info(f"🔖 Watchlist {kode_clean} -> {status}")
+        return saham_obj
+
+
+async def analyze_single_saham(
+    kode: str,
+    market: str = "IDX",
+    nama_perusahaan: str | None = None,
+    sektor: str | None = None,
+) -> dict[str, Any]:
+    """
+    Pipeline "Analyze" on-demand untuk SATU saham yang user temukan lewat search
+    (mis. SNPS dari NASDAQ) tanpa menambahkannya ke watchlist permanen.
+
+    Beda dengan job terjadwal (yang loop seluruh watchlist), fungsi ini:
+    1. Memastikan baris `Saham` ada (is_watchlist=False jika baru — lihat
+       get_or_create_saham) supaya FK Fundamental/ScoringMingguan terpenuhi.
+    2. Mengambil fundamental real-time untuk kode ini SAJA (1 yfinance call,
+       bukan loop ratusan/ribuan saham).
+    3. Menjalankan scoring_agent untuk kode ini SAJA, di dalam `scoring_lock`
+       supaya tidak bentrok dengan job scoring mingguan terjadwal yang juga
+       memakai Ollama (qwen3) — keduanya berbagi 1 instance model lokal.
+
+    Tidak pernah mengubah `is_watchlist` saham yang sudah ada — kalau saham
+    itu kebetulan sudah ada di watchlist, hasilnya dipakai sebagai refresh
+    biasa; kalau belum, tetap ad-hoc (tidak otomatis masuk watchlist).
+    """
+    kode_clean = kode.strip().upper()
+    market_clean = normalize_market(market)
+
+    if scoring_lock.locked():
+        logger.info(f"⏳ [Analyze] {kode_clean}: menunggu giliran (Ollama/LLM sedang dipakai proses lain)...")
+
+    async with scoring_lock:
+        logger.info(f"🔍 [Analyze] Mulai analisis on-demand untuk {kode_clean} (market={market_clean})...")
+
+        saham_obj = await get_or_create_saham(
+            kode_clean,
+            market=market_clean,
+            nama_perusahaan=nama_perusahaan,
+            sektor=sektor,
+        )
+
+        # Ambil fundamental real-time HANYA untuk kode ini
+        await scrape_and_save_fundamental_for_emiten(kode_clean, market=saham_obj.market)
+
+        # Jalankan scoring_agent untuk kode ini saja (list of 1 — tetap valid,
+        # lihat jalankan_scoring: tidak ada batas minimum jumlah saham)
+        hasil = await jalankan_scoring([kode_clean], simpan_ke_db=True)
+
+        logger.info(f"✅ [Analyze] {kode_clean} selesai dianalisis.")
+        return {
+            "kode": kode_clean,
+            "market": saham_obj.market,
+            "is_watchlist": saham_obj.is_watchlist,
+            "hasil": hasil[0] if hasil else None,
+        }
+
+
+async def scrape_news_job() -> None:
+    """
+    Background job untuk melakukan scraping berita saham dan berita pasar umum.
+    Berita disimpan ke PostgreSQL, dianalisis sentimennya, dan dimasukkan ke ChromaDB (RAG).
+    Dijalankan tiap 30 menit.
+    """
+    from backend.progress_tracker import set_progress
+    logger.info("⏰ Memulai background job: Scraping Berita...")
+    set_progress("scrape_news", 5, "running", "Mengambil daftar emiten...")
+    try:
+        # 1. Ambil daftar kode saham WATCHLIST dari PostgreSQL (bukan seluruh
+        #    simbol_referensi — saham hasil "Analyze" ad-hoc tidak ikut di sini)
+        async with async_session() as session:
+            result = await session.execute(select(Saham.kode).where(Saham.is_watchlist == True))
+            kode_saham_list = [row for row in result.scalars().all()]
+
+        if not kode_saham_list:
+            logger.warning("⚠️ Tidak ada kode saham terdaftar di DB. Skip scraping berita.")
+            set_progress("scrape_news", 100, "idle", "Selesai (tidak ada emiten)")
+            return
+
+        # 2. Collect berita untuk semua saham (batch)
+        logger.info(f"📰 Scraping berita untuk {len(kode_saham_list)} saham...")
+        set_progress("scrape_news", 15, "running", f"Scraping berita untuk {len(kode_saham_list)} emiten...")
+        
+        async def news_progress_callback(current, total, kode):
+            percent = int(15 + (current / total) * 15)  # Maps 15% to 30% progress
+            set_progress("scrape_news", percent, "running", f"Scraping berita emiten {kode} ({current}/{total})...")
+            
+        raw_berita = await collect_berita_batch(kode_saham_list, hari_terakhir=3, progress_callback=news_progress_callback)
+
+        # 3. Collect berita pasar umum
+        logger.info("🌐 Scraping berita pasar umum...")
+        set_progress("scrape_news", 30, "running", "Scraping berita pasar umum...")
+        raw_berita_pasar = await collect_berita_pasar(hari_terakhir=2)
+        raw_berita.extend(raw_berita_pasar)
+
+        # 4. Clean data, analisis sentimen, dan simpan ke PostgreSQL
+        saved_count = 0
+        total_berita = len(raw_berita)
+        async with async_session() as session:
+            for index, item in enumerate(raw_berita):
+                try:
+                    percent = int(35 + (index / max(total_berita, 1)) * 45)
+                    set_progress("scrape_news", percent, "running", f"Menganalisis sentimen berita {index+1}/{total_berita}...")
+                    # Clean data
+                    cleaned = clean_berita(item)
+                    # Hitung sentimen menggunakan isi_berita jika ada, fallback ke judul (Kasus 5)
+                    sentimen_text = cleaned.get("isi_berita") or cleaned["judul"]
+                    cleaned["skor_sentimen"] = await hitung_sentimen_qwen(sentimen_text)
+ 
+                    # Gunakan PostgreSQL insert ON CONFLICT DO NOTHING
+                    stmt = pg_insert(Berita).values(
+                        kode_saham=cleaned["kode_saham"],
+                        judul=cleaned["judul"],
+                        url=cleaned["url"],
+                        sumber=cleaned["sumber"],
+                        tanggal_publish=cleaned["tanggal_publish"],
+                        skor_sentimen=cleaned["skor_sentimen"],
+                        isi_berita=cleaned.get("isi_berita"),
+                        sudah_diembedding=False
+                    )
+                    stmt = stmt.on_conflict_do_nothing(index_elements=["url"])
+                    res = await session.execute(stmt)
+                    if res.rowcount > 0:
+                        saved_count += 1
+                except Exception as e:
+                    logger.error(f"❌ Gagal memproses single berita '{item.get('judul', '')[:30]}': {e}")
+            await session.commit()
+ 
+        logger.info(f"💾 {saved_count} berita baru berhasil disimpan ke PostgreSQL.")
+ 
+        # 5. Ambil berita yang belum di-embed dari PostgreSQL, kirim ke ChromaDB
+        async with async_session() as session:
+            stmt = select(Berita).where(Berita.sudah_diembedding == False)
+            result = await session.execute(stmt)
+            unembedded_news = result.scalars().all()
+ 
+            if unembedded_news:
+                logger.info(f"🧠 Melakukan embedding untuk {len(unembedded_news)} berita baru ke ChromaDB...")
+                set_progress("scrape_news", 85, "running", f"Melakukan embedding {len(unembedded_news)} berita ke ChromaDB...")
+                
+                # Ubah model SQLAlchemy ke format list of dict untuk indexer
+                berita_dict_list = []
+                for n in unembedded_news:
+                    berita_dict_list.append({
+                        "id": n.id,
+                        "kode_saham": n.kode_saham,
+                        "judul": n.judul,
+                        "url": n.url,
+                        "sumber": n.sumber,
+                        "tanggal_publish": n.tanggal_publish,
+                        "isi_berita": n.isi_berita,
+                    })
+ 
+                # Jalankan indexing
+                stats = await index_batch_berita(berita_dict_list)
+                
+                if stats["berhasil"] > 0:
+                    # Update status sudah_diembedding di Postgres
+                    success_urls = [n["url"] for n in berita_dict_list]
+                    # Kita lakukan chunk update status
+                    for n in unembedded_news:
+                        if n.url in success_urls:
+                            n.sudah_diembedding = True
+                    await session.commit()
+                    logger.info(f"✅ Embedding selesai: {stats['berhasil']} berita ter-index ke ChromaDB.")
+            else:
+                logger.info("🧠 Tidak ada berita baru untuk di-embed.")
+        
+        set_progress("scrape_news", 100, "idle", f"Selesai (Berhasil menyimpan {saved_count} berita)")
+
+    except Exception as e:
+        logger.error(f"❌ Gagal menjalankan scraping berita: {e}")
+        set_progress("scrape_news", 0, "failed", f"Gagal: {e}")
+    logger.info("⏰ Background job: Scraping Berita selesai.")
+
+
+async def scrape_fundamental_job() -> None:
+    """
+    Background job untuk memperbarui data fundamental dan harga harian emiten.
+    Dijalankan tiap hari.
+    """
+    from backend.progress_tracker import set_progress
+    logger.info("⏰ Memulai background job: Scraping Fundamental...")
+    set_progress("scrape_fundamental", 5, "running", "Mengambil daftar emiten...")
+    try:
+        # 1. Ambil daftar kode saham WATCHLIST + metadata (nama, sektor, market) untuk teks RAG
+        async with async_session() as session:
+            result = await session.execute(
+                select(Saham.kode, Saham.nama_perusahaan, Saham.sektor, Saham.market)
+                .where(Saham.is_watchlist == True)
+            )
+            saham_rows = result.all()
+            kode_saham_list = [row[0] for row in saham_rows]
+            saham_meta: dict[str, dict[str, str | None]] = {
+                row[0]: {"nama_perusahaan": row[1], "sektor": row[2]} for row in saham_rows
+            }
+            market_map: dict[str, str] = {row[0]: normalize_market(row[3]) for row in saham_rows}
+
+        if not kode_saham_list:
+            logger.warning("⚠️ Tidak ada kode saham watchlist terdaftar di DB.")
+            set_progress("scrape_fundamental", 100, "idle", "Selesai (tidak ada emiten)")
+            return
+
+        # 2. Collect fundamental dari Yahoo Finance — dikelompokkan per market supaya
+        #    suffix ticker (.JK untuk IDX, tanpa suffix untuk NASDAQ/NYSE/ETF) benar.
+        logger.info(f"📊 Mengambil fundamental untuk {len(kode_saham_list)} saham watchlist...")
+        set_progress("scrape_fundamental", 15, "running", f"Mengambil data fundamental dari Yahoo Finance...")
+        kode_by_market: dict[str, list[str]] = {}
+        for kode in kode_saham_list:
+            kode_by_market.setdefault(market_map.get(kode, "IDX"), []).append(kode)
+
+        raw_fund: list[dict[str, Any]] = []
+        for market_grup, kode_list_grup in kode_by_market.items():
+            raw_fund.extend(
+                await collect_fundamental_batch(kode_list_grup, market=market_grup, batch_size=10)
+            )
+
+        # 3. Bersihkan dan simpan ke PostgreSQL
+        saved_count = 0
+        indexed_laporan_count = 0
+        total_stocks = len(raw_fund)
+        async with async_session() as session:
+            for index, item in enumerate(raw_fund):
+                try:
+                    kode = item.get("kode_saham")
+                    percent = int(20 + (index / max(total_stocks, 1)) * 80)
+                    set_progress("scrape_fundamental", percent, "running", f"Memproses fundamental & XBRL {kode} ({index+1}/{total_stocks})...")
+
+                    # XBRL IDX adalah sumber laporan keuangan KHUSUS emiten IDX —
+                    # dilewati untuk saham non-IDX (NASDAQ/NYSE/ETF) di watchlist.
+                    if kode and market_map.get(kode, "IDX") == "IDX":
+                        logger.info(f"🔍 Mengambil data XBRL IDX untuk {kode}...")
+                        xbrl_data = await collect_xbrl_fundamental(kode)
+                        if xbrl_data:
+                            item["roe"] = xbrl_data.get("roe")
+                            item["eps"] = xbrl_data.get("eps")
+                            item["der"] = xbrl_data.get("der")
+
+                            # Rekalkulasi PE & PBV menggunakan harga penutupan terupdate
+                            harga = item.get("harga_terakhir")
+                            if harga is not None:
+                                if item["eps"] and item["eps"] != 0:
+                                    item["pe_ratio"] = round(harga / item["eps"], 2)
+                                    if item["roe"] is not None:
+                                        item["pbv"] = round(item["pe_ratio"] * (item["roe"] / 100.0), 2)
+
+                            # 🆕 Index ringkasan laporan keuangan ke ChromaDB (collection: laporan_keuangan)
+                            # Dibungkus try/except agar kegagalan indexing tidak menggagalkan job utama
+                            try:
+                                meta = saham_meta.get(kode, {})
+                                teks_laporan = _buat_teks_laporan_keuangan(
+                                    kode=kode,
+                                    nama_perusahaan=meta.get("nama_perusahaan"),
+                                    sektor=meta.get("sektor"),
+                                    xbrl_data=xbrl_data,
+                                )
+                                tahun_lap = xbrl_data.get("tahun", "?")
+                                periode_lap = xbrl_data.get("periode", "Audit")
+                                chunks = await index_laporan_keuangan(
+                                    teks=teks_laporan,
+                                    kode_saham=kode,
+                                    periode=f"{periode_lap} {tahun_lap}",
+                                    sumber="idx_xbrl",
+                                )
+                                if chunks > 0:
+                                    indexed_laporan_count += 1
+                                    logger.info(
+                                        f"📚 Laporan keuangan {kode} ({periode_lap} {tahun_lap}) "
+                                        f"berhasil di-index ke ChromaDB ({chunks} chunk)."
+                                    )
+                            except Exception as idx_err:
+                                logger.error(f"❌ Gagal index laporan keuangan {kode} ke ChromaDB: {idx_err}")
+
+                        # Delay kecil agar sopan ke IDX API
+                        await asyncio.sleep(1.0)
+
+                    cleaned = normalize_fundamental(item)
+
+                    # Simpan/Upsert ke fundamental harian
+                    # Kombinasi (kode_saham, tanggal) unik
+                    stmt = pg_insert(Fundamental).values(
+                        kode_saham=cleaned["kode_saham"],
+                        tanggal=cleaned["tanggal"],
+                        harga_terakhir=cleaned["harga_terakhir"],
+                        volume=cleaned["volume"],
+                        roe=cleaned["roe"],
+                        eps=cleaned["eps"],
+                        pbv=cleaned["pbv"],
+                        der=cleaned["der"],
+                        market_cap=cleaned["market_cap"],
+                        pe_ratio=cleaned["pe_ratio"],
+                        dividend_yield=cleaned["dividend_yield"]
+                    )
+                    
+                    # Update jika duplikat di hari yang sama
+                    stmt = stmt.on_conflict_do_update(
+                        constraint="uq_fundamental_kode_tanggal",
+                        set_={
+                            "harga_terakhir": cleaned["harga_terakhir"],
+                            "volume": cleaned["volume"],
+                            "roe": cleaned["roe"],
+                            "eps": cleaned["eps"],
+                            "pbv": cleaned["pbv"],
+                            "der": cleaned["der"],
+                            "market_cap": cleaned["market_cap"],
+                            "pe_ratio": cleaned["pe_ratio"],
+                            "dividend_yield": cleaned["dividend_yield"]
+                        }
+                    )
+                    await session.execute(stmt)
+                    saved_count += 1
+                except Exception as e:
+                    logger.error(f"❌ Gagal memproses fundamental {item.get('kode_saham', '')}: {e}")
+            await session.commit()
+        logger.info(f"💾 {saved_count} data fundamental berhasil disimpan/diperbarui di PostgreSQL.")
+        logger.info(f"📚 {indexed_laporan_count} ringkasan laporan keuangan berhasil di-index ke ChromaDB.")
+        set_progress("scrape_fundamental", 100, "idle", "Selesai")
+
+    except Exception as e:
+        logger.error(f"❌ Gagal menjalankan scraping fundamental: {e}")
+        set_progress("scrape_fundamental", 0, "failed", f"Gagal: {e}")
+    logger.info("⏰ Background job: Scraping Fundamental selesai.")
+
+
+async def scrape_makro_job() -> None:
+    """
+    Background job untuk memperbarui data makroekonomi (BI rate, Inflasi, kurs USD/IDR, IHSG).
+    Dijalankan tiap hari.
+    """
+    from backend.progress_tracker import set_progress
+    logger.info("⏰ Memulai background job: Scraping Makroekonomi...")
+    set_progress("scrape_makro", 10, "running", "Menghubungkan ke API Bank Indonesia & BPS...")
+    try:
+        raw_makro = await collect_makro()
+
+        set_progress("scrape_makro", 50, "running", "Menyimpan indikator makroekonomi ke database...")
+        saved_count = 0
+        async with async_session() as session:
+            for item in raw_makro:
+                try:
+                    stmt = pg_insert(Makro).values(
+                        tanggal=item["tanggal"],
+                        indikator=item["indikator"],
+                        nilai=item["nilai"],
+                        satuan=item["satuan"],
+                        sumber=item["sumber"]
+                    )
+                    # Update jika tanggal & indikator duplikat
+                    stmt = stmt.on_conflict_do_update(
+                        constraint="uq_makro_indikator_tanggal",
+                        set_={
+                            "nilai": item["nilai"],
+                            "satuan": item["satuan"],
+                            "sumber": item["sumber"]
+                        }
+                    )
+                    await session.execute(stmt)
+                    saved_count += 1
+                except Exception as e:
+                    logger.error(f"❌ Gagal memproses data makro {item.get('indikator', '')}: {e}")
+            await session.commit()
+        logger.info(f"💾 {saved_count} data makroekonomi berhasil disimpan/diperbarui.")
+
+        # Index data makro ke ChromaDB (Kasus 1)
+        if raw_makro:
+            try:
+                from backend.rag.indexer import index_data_makro
+                
+                summary_parts = []
+                for item in raw_makro:
+                    summary_parts.append(
+                        f"- {item['indikator'].replace('_', ' ').upper()}: {item['nilai']} {item['satuan']} (Sumber: {item['sumber']})"
+                    )
+                
+                summary_text = f"Kondisi Makroekonomi Indonesia per {date.today().isoformat()}:\n" + "\n".join(summary_parts)
+                
+                logger.info("📥 Meng-index ringkasan data makro ke ChromaDB...")
+                set_progress("scrape_makro", 80, "running", "Meng-index ringkasan makro ke ChromaDB...")
+                await index_data_makro(summary_text, indikator="ringkasan_makro", sumber="system_generated")
+            except Exception as ex_index:
+                logger.error(f"❌ Gagal meng-index data makro ke ChromaDB: {ex_index}")
+        
+        set_progress("scrape_makro", 100, "idle", "Selesai")
+
+    except Exception as e:
+        logger.error(f"❌ Gagal menjalankan scraping makroekonomi: {e}")
+        set_progress("scrape_makro", 0, "failed", f"Gagal: {e}")
+    logger.info("⏰ Background job: Scraping Makroekonomi selesai.")
+
+
+async def run_scoring_job() -> None:
+    """
+    Background job untuk melakukan scoring mingguan (top 10 rekomendasi).
+    Dijalankan setiap hari Senin jam 06:00 pagi.
+    """
+    from backend.progress_tracker import set_progress
+    logger.info("⏰ Memulai background job: Scoring Rekomendasi Mingguan...")
+    set_progress("run_scoring", 5, "running", "Memuat daftar emiten...")
+    try:
+        # 1. Ambil daftar kode saham WATCHLIST saja (bukan seluruh simbol_referensi)
+        async with async_session() as session:
+            result = await session.execute(select(Saham.kode).where(Saham.is_watchlist == True))
+            kode_saham_list = [row for row in result.scalars().all()]
+
+        if not kode_saham_list:
+            msg = "Tidak ada kode saham watchlist untuk di-scoring."
+            logger.warning(f"⚠️ {msg}")
+            notifier.report_error("scoring_job", msg, level="ERROR", auto_open_browser=True)
+            set_progress("run_scoring", 0, "failed", msg)
+            return
+
+        # 2. Jalankan pipeline scoring — dikunci scoring_lock supaya tidak bentrok
+        #    dengan analisis "Analyze" on-demand yang sama-sama memakai Ollama lokal.
+        logger.info(f"🚀 Menjalankan scoring untuk {len(kode_saham_list)} saham watchlist...")
+        set_progress("run_scoring", 15, "running", f"Menjalankan scoring untuk {len(kode_saham_list)} emiten...")
+        if scoring_lock.locked():
+            logger.info("⏳ Scoring mingguan menunggu: ada analisis on-demand sedang berjalan...")
+        async with scoring_lock:
+            await jalankan_scoring(kode_saham_list, simpan_ke_db=True)
+        logger.info("✅ Scoring rekomendasi mingguan selesai.")
+        notifier.report_info("scoring_job", f"Scoring mingguan selesai untuk {len(kode_saham_list)} emiten. Lihat hasil di tab Rekomendasi.")
+        set_progress("run_scoring", 100, "idle", "Selesai")
+
+    except RuntimeError as e:
+        # RuntimeError dilempar oleh scoring_agent jika ada emiten yang gagal atau DB offline
+        msg = f"Scoring DIHENTIKAN karena error kritis: {e}"
+        logger.critical(f"🚨 {msg}")
+        notifier.report_error("scoring_job", msg, level="CRITICAL", auto_open_browser=True)
+        set_progress("run_scoring", 0, "failed", msg)
+    except Exception as e:
+        msg = f"Gagal menjalankan scoring mingguan: {type(e).__name__}: {e}"
+        logger.error(f"❌ {msg}")
+        notifier.report_error("scoring_job", msg, level="ERROR", auto_open_browser=True)
+        set_progress("run_scoring", 0, "failed", msg)
+    logger.info("⏰ Background job: Scoring selesai.")
+
+
+async def update_last_prices_job() -> None:
+    """
+    Background job untuk memperbarui hanya harga_terakhir dan volume saham.
+    Dijalankan setiap 30 menit sekali.
+    """
+    logger.info("⏰ Memulai background job: Update Last Price (30 Menit Sekali)...")
+    try:
+        # 1. Ambil daftar kode saham WATCHLIST saja
+        async with async_session() as session:
+            result = await session.execute(
+                select(Saham.kode, Saham.market).where(Saham.is_watchlist == True)
+            )
+            rows = result.all()
+            kode_saham_list = [row[0] for row in rows]
+            market_map = {row[0]: normalize_market(row[1]) for row in rows}
+
+        if not kode_saham_list:
+            logger.warning("⚠️ Tidak ada kode saham watchlist terdaftar di DB.")
+            return
+
+        # 2. Ambil update harga tercepat dari Yahoo Finance (market-aware per saham)
+        logger.info(f"📊 Mengambil update harga cepat untuk {len(kode_saham_list)} saham watchlist...")
+        raw_prices = await collect_last_prices(kode_saham_list, market_map=market_map)
+
+        # 3. Simpan/Update ke PostgreSQL
+        updated_count = 0
+        async with async_session() as session:
+            for data in raw_prices:
+                try:
+                    if data["harga_terakhir"] is not None:
+                        # Update / Upsert ke fundamental harian (uq_fundamental_kode_tanggal)
+                        # Kita gunakan ON CONFLICT DO UPDATE untuk update harga_terakhir & volume saja
+                        stmt = pg_insert(Fundamental).values(
+                            kode_saham=data["kode_saham"],
+                            tanggal=data["tanggal"],
+                            harga_terakhir=data["harga_terakhir"],
+                            volume=data["volume"]
+                        )
+                        stmt = stmt.on_conflict_do_update(
+                            constraint="uq_fundamental_kode_tanggal",
+                            set_={
+                                "harga_terakhir": data["harga_terakhir"],
+                                "volume": data["volume"]
+                            }
+                        )
+                        await session.execute(stmt)
+                        updated_count += 1
+                except Exception as e:
+                    logger.error(f"❌ Gagal memproses update harga untuk {data.get('kode_saham', '')}: {e}")
+            await session.commit()
+            
+        logger.info(f"💾 {updated_count} harga saham berhasil diperbarui di PostgreSQL.")
+    except Exception as e:
+        logger.error(f"❌ Gagal menjalankan job update last price: {e}")
+    logger.info("⏰ Background job: Update Last Price selesai.")
+
+
+async def warm_up_candles_cache_job() -> None:
+    """
+    Background job untuk melakukan pre-warming cache candlestick chart (1D, 1W) untuk seluruh emiten.
+    Dijalankan setiap 15 menit sekali untuk memastikan page detail load instan.
+    """
+    logger.info("⏰ Memulai background job: Pre-warming Candlestick Cache...")
+    try:
+        from backend.api.routes.data import fetch_candles_yf
+        
+        # 1. Ambil daftar kode saham WATCHLIST saja
+        async with async_session() as session:
+            result = await session.execute(
+                select(Saham.kode, Saham.market).where(Saham.is_watchlist == True)
+            )
+            rows = result.all()
+            
+        if not rows:
+            logger.warning("⚠️ Tidak ada kode saham watchlist untuk pre-warming cache.")
+            return
+            
+        loop = asyncio.get_running_loop()
+        
+        # Pre-warm 1D dan 1W untuk setiap emiten watchlist
+        for symbol, market in rows:
+            for range_val in ["1D", "1W"]:
+                # Panggil fetch_candles_yf di thread pool agar men-cache datanya
+                await loop.run_in_executor(None, fetch_candles_yf, symbol, range_val, normalize_market(market))
+                await asyncio.sleep(0.2)  # delay sopan agar tidak di-rate-limit
+                
+        logger.info(f"✅ Pre-warming Candlestick Cache selesai untuk {len(rows)} saham watchlist.")
+    except Exception as e:
+        logger.error(f"❌ Gagal menjalankan pre-warming candlestick cache: {e}")
+
+
+async def check_earnings_and_rally_job() -> None:
+    """
+    Background job: per emiten watchlist, cek 2 hal dan buat notifikasi (Alert)
+    kalau relevan:
+
+    1. Jadwal rilis laporan keuangan (earnings) yang tinggal H-3 atau H-1 —
+       beserta perkiraan EPS/revenue dari yfinance (sifatnya estimasi, bisa
+       meleset dari tanggal/rilis aktual).
+    2. "Rally streak" — harga close naik (hijau) 3 hari perdagangan
+       berturut-turut atau lebih.
+
+    Alert disimpan ke tabel `alert` dengan `jenis='earnings'` atau
+    `jenis='rally_streak'`, dan dicegah duplikat di hari yang sama per emiten
+    per jenis (supaya user tidak di-spam notifikasi yang sama berkali-kali).
+
+    Direkomendasikan dijalankan 1x sehari (mis. jam 08:00 WIB, setelah
+    job_daily_data_update) — jadwal earnings & rally streak tidak berubah
+    secepat harga, jadi tidak perlu dicek tiap 30 menit.
+    """
+    logger.info("⏰ Memulai background job: Cek Jadwal Earnings & Rally Streak...")
+    from backend.api.routes.data import fetch_earnings_info, fetch_candles_yf, compute_rally_streak
+
+    try:
+        async with async_session() as session:
+            result = await session.execute(
+                select(Saham.kode, Saham.market).where(Saham.is_watchlist == True)
+            )
+            rows = result.all()
+
+        if not rows:
+            logger.warning("⚠️ Tidak ada kode saham watchlist untuk cek earnings/rally streak.")
+            return
+
+        loop = asyncio.get_running_loop()
+        hari_ini = datetime.now(_WIB).date()
+        jumlah_alert_baru = 0
+
+        for kode, market in rows:
+            market_clean = normalize_market(market)
+
+            # --- 1. Cek jadwal earnings (H-3 / H-1) ---
+            try:
+                info = await loop.run_in_executor(None, fetch_earnings_info, kode, market_clean)
+                next_date_str = info.get("next_earnings_date")
+                if next_date_str:
+                    try:
+                        next_date = datetime.fromisoformat(next_date_str.replace("Z", "+00:00")).date()
+                    except ValueError:
+                        next_date = None
+
+                    if next_date:
+                        selisih_hari = (next_date - hari_ini).days
+                        if selisih_hari in (1, 3):
+                            eps_est = info.get("eps_estimate")
+                            eps_text = f", perkiraan EPS {eps_est:.2f}" if eps_est is not None else ""
+                            pesan = (
+                                f"Perkiraan rilis laporan keuangan {kode} dalam {selisih_hari} hari "
+                                f"lagi ({next_date.isoformat()}){eps_text}. Estimasi dari konsensus "
+                                f"analis, tanggal aktual bisa berubah."
+                            )
+                            dibuat = await _buat_alert_jika_belum_ada(
+                                kode_saham=kode, jenis="earnings", pesan=pesan,
+                                delta=0.0, hari_ini=hari_ini,
+                            )
+                            if dibuat:
+                                jumlah_alert_baru += 1
+            except Exception as e:
+                logger.warning(f"⚠️ Gagal cek jadwal earnings untuk {kode}: {e}")
+
+            # --- 2. Cek rally streak (candle harian 1 bulan terakhir) ---
+            try:
+                candles = await loop.run_in_executor(None, fetch_candles_yf, kode, "1M", market_clean)
+                streak_info = compute_rally_streak(candles)
+                if streak_info["is_rally_streak"]:
+                    streak = streak_info["streak_hari"]
+                    pesan = (
+                        f"{kode} sedang rally streak: harga hijau (naik) {streak} hari "
+                        f"perdagangan berturut-turut."
+                    )
+                    dibuat = await _buat_alert_jika_belum_ada(
+                        kode_saham=kode, jenis="rally_streak", pesan=pesan,
+                        delta=float(streak), hari_ini=hari_ini,
+                    )
+                    if dibuat:
+                        jumlah_alert_baru += 1
+            except Exception as e:
+                logger.warning(f"⚠️ Gagal cek rally streak untuk {kode}: {e}")
+
+            await asyncio.sleep(0.2)  # delay sopan agar tidak di-rate-limit yfinance
+
+        logger.info(
+            f"✅ Cek Earnings & Rally Streak selesai. {jumlah_alert_baru} alert baru dibuat "
+            f"dari {len(rows)} saham watchlist."
+        )
+    except Exception as e:
+        logger.error(f"❌ Gagal menjalankan job cek earnings & rally streak: {e}")
+
+
+async def _buat_alert_jika_belum_ada(
+    kode_saham: str, jenis: str, pesan: str, delta: float, hari_ini: date
+) -> bool:
+    """
+    Helper: simpan Alert baru ke DB, TAPI cek dulu apakah sudah ada alert
+    dengan `kode_saham` + `jenis` yang sama di hari yang sama — supaya user
+    tidak menerima notifikasi duplikat berkali-kali dalam satu hari
+    (mis. earnings H-3 yang sama dicek ulang tiap kali job jalan).
+
+    Returns:
+        True kalau alert baru berhasil dibuat, False kalau sudah ada (skip).
+    """
+    try:
+        async with async_session() as session:
+            awal_hari = datetime.combine(hari_ini, datetime.min.time(), tzinfo=_WIB)
+            stmt_cek = select(Alert.id).where(
+                Alert.kode_saham == kode_saham,
+                Alert.jenis == jenis,
+                Alert.tanggal >= awal_hari,
+            )
+            res_cek = await session.execute(stmt_cek)
+            if res_cek.scalar_one_or_none():
+                return False  # sudah ada alert jenis ini hari ini, skip
+
+            new_alert = Alert(
+                kode_saham=kode_saham,
+                tanggal=datetime.now(_WIB),
+                pesan=pesan,
+                delta=delta,
+                dikirim=False,
+                jenis=jenis,
+            )
+            session.add(new_alert)
+            await session.commit()
+            logger.info(f"💾 Alert baru ({jenis}) dibuat untuk {kode_saham}: {pesan}")
+            return True
+    except Exception as e:
+        logger.error(f"❌ Gagal menyimpan alert ({jenis}) untuk {kode_saham}: {e}")
+        return False
