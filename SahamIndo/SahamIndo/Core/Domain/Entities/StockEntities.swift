@@ -18,6 +18,9 @@ struct Stock: Identifiable, Hashable {
     let price: Double
     let change: Double
     let percentChange: Double
+    /// "IDX" | "NASDAQ" | "NYSE" | "ETF" — dipakai untuk format harga yang benar
+    /// (IDX tanpa desimal, non-IDX 2 desimal). Default "IDX" untuk backward-compat.
+    let market: String
 }
 
 // MARK: - StockDetail
@@ -34,6 +37,8 @@ struct StockDetail: Identifiable {
     let change: Double
     let percentChange: Double
     let updatedAt: Date?
+    /// "IDX" | "NASDAQ" | "NYSE" | "ETF" — lihat catatan di Stock.market.
+    let market: String
 }
 
 // MARK: - SentimentType

@@ -31,7 +31,6 @@ struct Holding: Identifiable, Codable, Equatable {
 // MARK: - PortfolioItem (computed, never persisted)
 
 struct PortfolioItem: Identifiable, Hashable {
-    let id = UUID()
     let symbol: String
     let name: String?
     let price: Double
@@ -39,6 +38,15 @@ struct PortfolioItem: Identifiable, Hashable {
     let percentChange: Double
     let quantity: Double
     let sentiment: Sentiment
+    /// "IDX" | "NASDAQ" | "NYSE" | "ETF" — dipakai untuk format harga yang benar
+    /// (IDX dibulatkan tanpa desimal, non-IDX 2 desimal, mis. "197,53").
+    let market: String
+
+    /// Stabil berdasarkan symbol (bukan UUID acak) — supaya saat harga
+    /// diperbarui lewat streaming (instance PortfolioItem baru dibuat tiap
+    /// update), SwiftUI List/ForEach tetap mengenalinya sebagai "baris yang
+    /// sama, datanya berubah" alih-alih menganggap baris baru.
+    var id: String { symbol }
 
     var value: Double { price * quantity }
     var costBasis: Double { quantity > 0 ? sentiment.score : 0 }  // kept for hashing

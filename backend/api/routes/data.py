@@ -7,7 +7,7 @@ dan indikator makroekonomi terupdate dari database.
 
 import asyncio
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 import yfinance as yf
 
-from backend.db.postgres import get_db_session, Saham, Fundamental, Makro, SimbolReferensi
+from backend.db.postgres import get_db_session, async_session, Saham, Fundamental, Makro, SimbolReferensi
 from backend.utils.ticker import get_yf_symbol, normalize_market
 
 router = APIRouter(
@@ -39,7 +39,7 @@ async def get_saham_list(db: AsyncSession = Depends(get_db_session)):
         stmt = select(Saham).where(Saham.is_watchlist == True).order_by(Saham.kode)
         result = await db.execute(stmt)
         saham_list = result.scalars().all()
-        
+
         return [
             {
                 "kode": s.kode,
@@ -251,13 +251,13 @@ def fetch_yf_single(symbol: str, market: str = "IDX") -> tuple[float, float, flo
     market_clean = normalize_market(market)
     cache_key = (symbol_upper, market_clean)
     now = time.time()
-    
+
     # Cek cache (cache key ikut market supaya kode yang sama di market berbeda tidak bentrok)
     if cache_key in _yf_single_cache:
         cached_time, cached_data = _yf_single_cache[cache_key]
         if now - cached_time < YF_SINGLE_CACHE_TTL:
             return cached_data
-            
+
     try:
         ticker = yf.Ticker(get_yf_symbol(symbol_upper, market_clean))
         hist = ticker.history(period="2d")
@@ -277,8 +277,195 @@ def fetch_yf_single(symbol: str, market: str = "IDX") -> tuple[float, float, flo
                 return result
     except Exception as e:
         logger.error(f"Gagal mengambil fallback yfinance untuk {symbol_upper} ({market_clean}): {e}")
-        
+
     return 0.0, 0.0, 0.0
+
+
+# ============================================================
+# Extended Hours: Pre-Market & After-Market Price
+# ============================================================
+#
+# CATATAN PENTING:
+#   - Bursa Efek Indonesia (IDX) TIDAK punya sesi pre-market/after-market
+#     resmi seperti bursa AS (NASDAQ/NYSE) — cuma ada pra-pembukaan singkat
+#     lalu trading kontinu 09:00-16:00 WIB. Jadi untuk saham IDX, fungsi ini
+#     langsung return None tanpa buang request yfinance percuma.
+#   - Untuk NASDAQ/NYSE/ETF, data diambil dari ticker.get_info() (field
+#     "preMarketPrice"/"postMarketPrice" dari Yahoo), yang HANYA terisi
+#     kalau memang sedang dalam sesi tersebut saat ini.
+#   - Cache dibuat pendek (60 detik) karena harga extended hours bisa
+#     berubah cepat dan movement-nya sering jadi sinyal penting.
+
+_yf_extended_hours_cache = {}
+# Lacak post_market_time terakhir per simbol (independen dari cache TTL) —
+# supaya bisa dideteksi apakah field ini BENAR-BENAR berubah dari waktu ke
+# waktu (ada trade baru di Blue Ocean ATS) atau ternyata memang statis/beku
+# untuk waktu yang lama (indikasi Yahoo tidak me-refresh field ini).
+_yf_extended_hours_last_seen: dict[tuple, str | None] = {}
+YF_EXTENDED_HOURS_CACHE_TTL = 60  # 1 menit
+
+# Market yang diketahui punya sesi extended hours resmi di data Yahoo Finance.
+_MARKETS_WITH_EXTENDED_HOURS = {"NASDAQ", "NYSE", "ETF"}
+
+
+def fetch_extended_hours_info(symbol: str, market: str = "IDX") -> dict | None:
+    """
+    Mengambil info harga pre-market/after-market dari yfinance (synchronous),
+    KHUSUS untuk market yang benar-benar punya sesi extended hours.
+
+    Returns:
+        None kalau market tidak punya sesi extended hours (mis. IDX).
+        dict berisi market_state + pre/post market price kalau market-nya
+        didukung (nilai individual tetap bisa None kalau memang lagi tidak
+        dalam sesi pre/post-market saat ini).
+    """
+    market_clean = normalize_market(market)
+    if market_clean not in _MARKETS_WITH_EXTENDED_HOURS:
+        return None
+
+    symbol_upper = symbol.strip().upper()
+    cache_key = (symbol_upper, market_clean)
+    now = time.time()
+
+    if cache_key in _yf_extended_hours_cache:
+        cached_time, cached_data = _yf_extended_hours_cache[cache_key]
+        if now - cached_time < YF_EXTENDED_HOURS_CACHE_TTL:
+            return cached_data
+
+    result: dict[str, Any] = {
+        "market_state": None,               # "PRE" | "POST" | "POSTPOST" | "REGULAR" | "CLOSED" | dll (langsung dari Yahoo)
+        "pre_market_price": None,
+        "pre_market_change": None,
+        "pre_market_change_percent": None,
+        "post_market_price": None,
+        "post_market_change": None,
+        "post_market_change_percent": None,
+        # Sesi "Overnight" (Blue Ocean ATS, 20:00-04:00 ET, Min-Kam) — fitur
+        # yang relatif baru di Yahoo Finance. Nama field JSON persisnya BELUM
+        # dikonfirmasi (yfinance versi terinstall tidak punya referensi
+        # resmi ke ini) — nilai di bawah pakai tebakan nama field paling
+        # mungkin, DIVALIDASI lewat log diagnostik di bawah. Kalau nanti
+        # log menunjukkan nama field yang beda, tinggal disesuaikan.
+        "overnight_price": None,
+        "overnight_change": None,
+        "overnight_change_percent": None,
+        # Timestamp dari Yahoo kapan harga pre/post-market ini sebenarnya
+        # dicatat — PENTING untuk verifikasi apakah data yang ditampilkan
+        # benar-benar dari sesi yang sedang berjalan sekarang, atau ternyata
+        # data basi dari sesi sebelumnya (sesi Overnight melintasi 2 tanggal
+        # ET jadi rawan salah kira "hari ini" vs "kemarin").
+        "pre_market_time":  None,
+        "post_market_time": None,
+    }
+
+    try:
+        ticker = yf.Ticker(get_yf_symbol(symbol_upper, market_clean))
+        info = ticker.get_info()
+
+        result["market_state"] = info.get("marketState")
+
+        pre_price = info.get("preMarketPrice")
+        if pre_price is not None:
+            result["pre_market_price"] = float(pre_price)
+            result["pre_market_change"] = float(info.get("preMarketChange") or 0.0)
+            result["pre_market_change_percent"] = float(info.get("preMarketChangePercent") or 0.0)
+
+        post_price = info.get("postMarketPrice")
+        if post_price is not None:
+            result["post_market_price"] = float(post_price)
+            result["post_market_change"] = float(info.get("postMarketChange") or 0.0)
+            result["post_market_change_percent"] = float(info.get("postMarketChangePercent") or 0.0)
+
+        def _to_iso(v):
+            """Konversi epoch (int/float) ke ISO string UTC; kalau sudah
+            berupa string (kadang Yahoo kirim sudah ter-format), pass-through."""
+            if v is None:
+                return None
+            try:
+                if isinstance(v, (int, float)):
+                    return datetime.fromtimestamp(v, tz=timezone.utc).isoformat()
+                return str(v)
+            except Exception:
+                return str(v)
+
+        result["pre_market_time"]  = _to_iso(info.get("preMarketTime"))
+        result["post_market_time"] = _to_iso(info.get("postMarketTime"))
+
+        # Bandingkan dengan waktu yang tercatat di panggilan SEBELUMNYA untuk
+        # simbol ini (independen dari cache 60 detik) — supaya ketahuan apakah
+        # Yahoo BENAR-BENAR meng-update field ini seiring waktu, atau beku.
+        relevant_time = result["post_market_time"] if not result.get("pre_market_price") else result["pre_market_time"]
+        last_seen = _yf_extended_hours_last_seen.get(cache_key)
+        if last_seen is not None and relevant_time is not None:
+            if last_seen == relevant_time:
+                logger.info(
+                    f"🧊 {symbol_upper}: timestamp harga extended hours SAMA dengan cek "
+                    f"sebelumnya ({relevant_time}) — kemungkinan besar memang belum ada "
+                    f"trade baru di venue ini (bukan bug fetch)."
+                )
+            else:
+                logger.info(
+                    f"🔄 {symbol_upper}: timestamp harga extended hours BERUBAH "
+                    f"({last_seen} → {relevant_time}) — data memang ter-update, konfirmasi live."
+                )
+        _yf_extended_hours_last_seen[cache_key] = relevant_time
+
+        # Sesi Overnight (Blue Ocean ATS) — coba beberapa kemungkinan nama
+        # field sekaligus, karena belum ada dokumentasi resmi field mana yang
+        # dipakai Yahoo untuk sesi ini.
+        overnight_price = (
+            info.get("overnightMarketPrice")
+            or info.get("postMarketOvernightPrice")
+            or info.get("extendedMarketPrice")
+        )
+        if overnight_price is not None:
+            result["overnight_price"] = float(overnight_price)
+            overnight_change = info.get("overnightMarketChange") or info.get("extendedMarketChange")
+            overnight_change_pct = info.get("overnightMarketChangePercent") or info.get("extendedMarketChangePercent")
+            result["overnight_change"] = float(overnight_change) if overnight_change is not None else 0.0
+            result["overnight_change_percent"] = float(overnight_change_pct) if overnight_change_pct is not None else 0.0
+
+        # DIAGNOSTIC LOGGING — sengaja selalu di-log (bukan cuma pas exception),
+        # karena kegagalan ambil preMarketPrice/postMarketPrice dari yfinance
+        # BISA TERJADI DIAM-DIAM: yfinance internal (_fetch_additional_info di
+        # quote.py) menelan HTTPError-nya sendiri dan cuma log ke logger
+        # "yfinance" bawaan Python (bukan loguru yang dipakai app ini), jadi
+        # kegagalannya tidak akan pernah muncul di log aplikasi tanpa baris ini.
+        #
+        # Baris "kandidat field overnight" khusus untuk menemukan nama field
+        # JSON yang benar dari Yahoo untuk sesi Blue Ocean ATS — cari semua
+        # key yang mengandung "night" (overnight) atau "blue"/"ocean" di raw
+        # info dict, supaya kalau tebakan nama field di atas salah, nama yang
+        # benar tetap kelihatan di log ini.
+        overnight_candidate_keys = [
+            k for k in info.keys()
+            if "night" in k.lower() or "blue" in k.lower() or "ocean" in k.lower()
+        ]
+        if pre_price is None and post_price is None:
+            logger.info(
+                f"ℹ️ Extended hours {symbol_upper}: market_state={result['market_state']!r}, "
+                f"tidak ada preMarketPrice/postMarketPrice di response Yahoo saat ini "
+                f"(field ada di info: {[k for k in info.keys() if 'arket' in k.lower()]})"
+            )
+        else:
+            logger.info(
+                f"✅ Extended hours {symbol_upper}: market_state={result['market_state']!r}, "
+                f"pre={pre_price} (pre_time={result['pre_market_time']}), "
+                f"post={post_price} (post_time={result['post_market_time']}), "
+                f"overnight_guess={overnight_price} — "
+                f"BANDINGKAN post_time di atas dengan waktu sekarang untuk cek apakah data ini basi."
+            )
+        if overnight_candidate_keys:
+            logger.info(
+                f"🌙 Kandidat field overnight untuk {symbol_upper}: "
+                f"{ {k: info.get(k) for k in overnight_candidate_keys} }"
+            )
+
+    except Exception as e:
+        logger.warning(f"Tidak bisa ambil data extended hours untuk {symbol_upper}: {e}")
+
+    _yf_extended_hours_cache[cache_key] = (now, result)
+    return result
 
 
 # ============================================================
@@ -329,12 +516,36 @@ class PriceStreamManager:
 
     async def _poll_loop(self, symbol: str, market: str):
         loop = asyncio.get_running_loop()
+        consecutive_failures = 0
         try:
             while self.subscribers.get(symbol):
                 try:
                     price, change, pct_change = await loop.run_in_executor(
                         None, fetch_yf_single, symbol, market
                     )
+                    # fetch_yf_single mengembalikan (0.0, 0.0, 0.0) sebagai sentinel
+                    # kegagalan (yfinance kosong/rate-limited/error, ATAU simbol
+                    # dengan market yang salah — mis. saham NASDAQ yang salah
+                    # tersimpan sebagai IDX sehingga dicoba sebagai "XXX.JK" yang
+                    # tidak pernah ada). JANGAN broadcast nilai ini, supaya client
+                    # tidak menimpa harga valid terakhir dengan 0.
+                    if price <= 0:
+                        consecutive_failures += 1
+                        # Circuit breaker: kalau gagal terus-menerus (simbol
+                        # kemungkinan besar memang rusak/salah market, bukan
+                        # cuma hiccup sesaat), perlambat retry secara bertahap
+                        # sampai maksimum 5 menit — supaya tidak menggedor
+                        # Yahoo tanpa henti tiap 5 detik untuk sesuatu yang
+                        # kemungkinan besar tidak akan pernah berhasil.
+                        backoff = min(POLL_INTERVAL_SECONDS * (2 ** min(consecutive_failures, 6)), 300)
+                        logger.warning(
+                            f"⚠️ Fetch harga streaming {symbol} gagal ke-{consecutive_failures} kali "
+                            f"berturut-turut (sentinel 0.0). Skip broadcast, retry dalam {backoff:.0f}s."
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    consecutive_failures = 0
                     payload = {
                         "symbol": symbol,
                         "price": price,
@@ -384,6 +595,155 @@ async def stock_price_ws(websocket: WebSocket, symbol: str, market: str = "IDX")
         stream_manager.unsubscribe(symbol_upper, websocket)
 
 
+# ============================================================
+# WebSocket: Streaming Harga SELURUH Watchlist (untuk Home/List View)
+# ============================================================
+#
+# Beda dengan PriceStreamManager di atas (1 simbol per koneksi, dipakai
+# StockDetailView), manager ini melayani SATU koneksi WebSocket yang
+# membawa update harga untuk SEMUA saham watchlist sekaligus — supaya
+# halaman daftar saham (Home) tidak perlu membuka puluhan koneksi WebSocket
+# bersamaan (satu per baris list).
+
+WATCHLIST_POLL_INTERVAL_SECONDS = 5.0
+
+
+class WatchlistStreamManager:
+    """
+    Satu polling loop yang di-share untuk semua client yang membuka halaman
+    daftar saham. Tiap siklus, ambil harga terbaru seluruh watchlist lalu
+    broadcast sebagai satu payload gabungan ke semua client yang subscribe.
+    """
+
+    def __init__(self):
+        self.clients: set[WebSocket] = set()
+        self._task: asyncio.Task | None = None
+        # Circuit breaker per simbol: simbol yang gagal fetch terus-menerus
+        # (mis. market salah tersimpan, kode delisted) di-skip sementara
+        # dengan backoff bertahap, bukan digedor tiap siklus 5 detik selamanya.
+        self._consecutive_failures: dict[str, int] = {}
+        self._skip_until: dict[str, float] = {}
+
+    async def subscribe(self, ws: WebSocket):
+        self.clients.add(ws)
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._poll_loop())
+
+    def unsubscribe(self, ws: WebSocket):
+        self.clients.discard(ws)
+        if not self.clients and self._task is not None:
+            self._task.cancel()
+            self._task = None
+
+    async def _poll_loop(self):
+        loop = asyncio.get_running_loop()
+        try:
+            while self.clients:
+                try:
+                    async with async_session() as session:
+                        stmt = (
+                            select(Saham.kode, Saham.market)
+                            .where(Saham.is_watchlist == True)
+                            .order_by(Saham.kode)
+                        )
+                        res = await session.execute(stmt)
+                        rows = res.all()
+
+                    updates = []
+                    for kode, market in rows:
+                        now_ts = time.time()
+                        if self._skip_until.get(kode, 0) > now_ts:
+                            # Masih dalam masa backoff dari kegagalan sebelumnya —
+                            # skip simbol ini siklus ini, coba lagi setelah waktunya.
+                            continue
+
+                        price, change, pct_change = await loop.run_in_executor(
+                            None, fetch_yf_single, kode, market
+                        )
+                        # Sama seperti PriceStreamManager: skip simbol yang gagal
+                        # fetch (sentinel 0.0) supaya tidak menimpa harga valid
+                        # terakhir di client dengan 0. Circuit breaker: kalau
+                        # gagal berturut-turut, perlambat retry sampai maks 5 menit.
+                        if price <= 0:
+                            failures = self._consecutive_failures.get(kode, 0) + 1
+                            self._consecutive_failures[kode] = failures
+                            backoff = min(WATCHLIST_POLL_INTERVAL_SECONDS * (2 ** min(failures, 6)), 300)
+                            self._skip_until[kode] = now_ts + backoff
+                            logger.warning(
+                                f"⚠️ Fetch harga watchlist {kode} gagal ke-{failures} kali "
+                                f"berturut-turut. Skip simbol ini selama {backoff:.0f}s."
+                            )
+                            continue
+
+                        self._consecutive_failures[kode] = 0
+
+                        # Data pre-market/after-market — fetch_extended_hours_info
+                        # sendiri sudah: (1) langsung return None utk IDX tanpa
+                        # network call sama sekali, (2) cache 60 detik utk market
+                        # yang didukung, jadi aman dipanggil tiap siklus 5 detik
+                        # tanpa menggedor Yahoo (network call sungguhan cuma tiap
+                        # 60 detik per simbol, walau di-cek tiap 5 detik).
+                        extended = await loop.run_in_executor(
+                            None, fetch_extended_hours_info, kode, market
+                        )
+
+                        update_item: dict[str, Any] = {
+                            "symbol": kode,
+                            "price": price,
+                            "change": change,
+                            "pct_change": pct_change,
+                        }
+                        if extended is not None:
+                            update_item["extended_hours"] = extended
+                        updates.append(update_item)
+                        # Jeda kecil antar simbol supaya request ke yfinance tidak
+                        # nge-burst semuanya di detik yang sama (rate-limit friendly).
+                        await asyncio.sleep(0.05)
+
+                    if updates:
+                        payload = {
+                            "type": "watchlist_update",
+                            "updates": updates,
+                            "ts": time.time(),
+                        }
+                        dead = []
+                        for client in list(self.clients):
+                            try:
+                                await client.send_json(payload)
+                            except Exception:
+                                dead.append(client)
+                        for client in dead:
+                            self.unsubscribe(client)
+                except Exception as e:
+                    logger.error(f"❌ Gagal polling watchlist streaming: {e}")
+
+                await asyncio.sleep(WATCHLIST_POLL_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            pass
+
+
+watchlist_stream_manager = WatchlistStreamManager()
+
+
+@router.websocket("/ws/stocks")
+async def watchlist_price_ws(websocket: WebSocket):
+    """
+    Streaming harga untuk SELURUH saham watchlist sekaligus, dipakai halaman
+    Home/List saham. Frontend connect ke ws(s)://<host>/ws/stocks dan akan
+    menerima payload `{type: "watchlist_update", updates: [{symbol, price,
+    change, pct_change}, ...], ts}` setiap ~5 detik.
+    """
+    await websocket.accept()
+    await watchlist_stream_manager.subscribe(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        watchlist_stream_manager.unsubscribe(websocket)
+
+
 async def get_single_stock_price_stats(symbol: str, db: AsyncSession, market: str = "IDX") -> tuple[float, float, float]:
     """
     Mengambil data harga penutupan terakhir, nominal perubahan, dan persentase perubahan untuk satu saham.
@@ -406,7 +766,7 @@ async def get_single_stock_price_stats(symbol: str, db: AsyncSession, market: st
             return round(price, 2), round(change, 2), round(pct_change, 2)
     except Exception as e:
         logger.warning(f"Gagal query DB fundamental untuk {symbol_upper}: {e}")
-        
+
     # Fallback ke yfinance
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, fetch_yf_single, symbol_upper, market)
@@ -422,15 +782,15 @@ def fetch_candles_yf(symbol: str, range_val: str, market: str = "IDX") -> list[d
     market_clean = normalize_market(market)
     cache_key = (symbol_upper, range_upper, market_clean)
     now = time.time()
-    
+
     # Cek cache
     if cache_key in _yf_candles_cache:
         cached_time, cached_data = _yf_candles_cache[cache_key]
         if now - cached_time < YF_CANDLES_CACHE_TTL:
             return cached_data
-            
+
     ticker_symbol = get_yf_symbol(symbol_upper, market_clean)
-    
+
     # Map range to period and interval
     range_map = {
         "1D": ("1d", "5m"),
@@ -441,16 +801,16 @@ def fetch_candles_yf(symbol: str, range_val: str, market: str = "IDX") -> list[d
         "1Y": ("1y", "1d"),
         "5Y": ("5y", "1wk"),
     }
-    
+
     period, interval = range_map.get(range_upper, ("1d", "5m"))
     try:
         ticker = yf.Ticker(ticker_symbol)
         df = ticker.history(period=period, interval=interval)
-        
+
         candles = []
         if df.empty:
             return candles
-            
+
         for ts, row in df.iterrows():
             if ts.tzinfo is None:
                 jkt_tz = pytz.timezone("Asia/Jakarta")
@@ -458,7 +818,7 @@ def fetch_candles_yf(symbol: str, range_val: str, market: str = "IDX") -> list[d
             else:
                 jkt_tz = pytz.timezone("Asia/Jakarta")
                 ts_aware = ts.astimezone(jkt_tz)
-                
+
             candles.append({
                 "ts": ts_aware.isoformat(),
                 "open": float(row["Open"]) if not pd.isna(row["Open"]) else None,
@@ -467,7 +827,7 @@ def fetch_candles_yf(symbol: str, range_val: str, market: str = "IDX") -> list[d
                 "close": float(row["Close"]),
                 "volume": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0
             })
-            
+
         _yf_candles_cache[cache_key] = (now, candles)
         return candles
     except Exception as e:
@@ -651,7 +1011,7 @@ async def get_stocks_prices(db: AsyncSession = Depends(get_db_session)):
         stmt_saham = select(Saham).where(Saham.is_watchlist == True).order_by(Saham.kode)
         res_saham = await db.execute(stmt_saham)
         saham_list = res_saham.scalars().all()
-        
+
         # 2. Ambil data fundamental terbaru (maks 2 per saham)
         subq = (
             select(
@@ -662,26 +1022,26 @@ async def get_stocks_prices(db: AsyncSession = Depends(get_db_session)):
                 ).label("rn")
             )
         ).subquery()
-        
+
         fund_alias = aliased(Fundamental, subq)
         stmt_funds = select(fund_alias).where(subq.c.rn <= 2)
         res_funds = await db.execute(stmt_funds)
         funds_list = res_funds.scalars().all()
-        
+
         db_funds = defaultdict(list)
         for f in funds_list:
             db_funds[f.kode_saham].append(f)
-            
+
         # 3. Proses masing-masing saham
         results = []
         fallback_symbols = []
         fallback_markets = []
         fallback_indexes = []
-        
+
         for idx, s in enumerate(saham_list):
             stock_funds = db_funds[s.kode]
             stock_funds.sort(key=lambda x: x.tanggal, reverse=True)
-            
+
             price, change, pct_change = None, None, None
             if len(stock_funds) >= 2 and stock_funds[0].harga_terakhir is not None and stock_funds[1].harga_terakhir is not None:
                 price = float(stock_funds[0].harga_terakhir)
@@ -691,12 +1051,12 @@ async def get_stocks_prices(db: AsyncSession = Depends(get_db_session)):
                 price = round(price, 2)
                 change = round(change, 2)
                 pct_change = round(pct_change, 2)
-                
+
             if price is None:
                 fallback_symbols.append(s.kode)
                 fallback_markets.append(s.market)
                 fallback_indexes.append(idx)
-                
+
             results.append({
                 "symbol": s.kode,
                 "name": s.nama_perusahaan,
@@ -705,25 +1065,25 @@ async def get_stocks_prices(db: AsyncSession = Depends(get_db_session)):
                 "change": change,
                 "pct_change": pct_change
             })
-            
+
         # 4. Ambil fallback data secara paralel jika ada
         if fallback_symbols:
             logger.info(f"Mengambil fallback yfinance untuk {len(fallback_symbols)} saham: {fallback_symbols}")
             loop = asyncio.get_running_loop()
-            
+
             tasks = [
                 loop.run_in_executor(None, fetch_yf_single, sym, mkt)
                 for sym, mkt in zip(fallback_symbols, fallback_markets)
             ]
             yf_results = await asyncio.gather(*tasks)
-            
+
             for yf_idx, res in enumerate(yf_results):
                 orig_idx = fallback_indexes[yf_idx]
                 price, change, pct_change = res
                 results[orig_idx]["price"] = price
                 results[orig_idx]["change"] = change
                 results[orig_idx]["pct_change"] = pct_change
-                
+
         return results
     except Exception as e:
         logger.error(f"Gagal mengambil daftar stocks: {e}")
@@ -746,14 +1106,14 @@ async def get_stock_candles(
     """
     symbol_upper = symbol.strip().upper()
     range_upper = range.strip().upper()
-    
+
     valid_ranges = {"1D", "1W", "1M", "3M", "YTD", "1Y", "5Y"}
     if range_upper not in valid_ranges:
         raise HTTPException(
             status_code=400,
             detail=f"Range tidak valid. Pilih salah satu dari: {list(valid_ranges)}"
         )
-        
+
     try:
         stmt_saham = select(Saham).where(Saham.kode == symbol_upper)
         res_saham = await db.execute(stmt_saham)
@@ -763,7 +1123,7 @@ async def get_stock_candles(
                 status_code=404,
                 detail=f"Saham dengan kode '{symbol_upper}' tidak terdaftar."
             )
-            
+
         loop = asyncio.get_running_loop()
         candles = await loop.run_in_executor(None, fetch_candles_yf, symbol_upper, range_upper, saham_obj.market)
         return candles
@@ -798,9 +1158,10 @@ async def get_single_stock_price(
                 status_code=404,
                 detail=f"Saham dengan kode '{symbol_upper}' tidak terdaftar."
             )
-            
+
         price, change, pct_change = await get_single_stock_price_stats(symbol_upper, db, saham_obj.market)
-        return {
+
+        response: dict[str, Any] = {
             "symbol": symbol_upper,
             "name": saham_obj.nama_perusahaan,
             "market": saham_obj.market,
@@ -808,6 +1169,19 @@ async def get_single_stock_price(
             "change": change,
             "pct_change": pct_change
         }
+
+        # Data extended hours (pre-market/after-market) — cuma muncul kalau
+        # market-nya didukung (NASDAQ/NYSE/ETF). Untuk IDX, key ini sengaja
+        # tidak ada sama sekali di response (bukan cuma null) supaya kompatibel
+        # dengan client lama yang belum tahu field ini.
+        loop = asyncio.get_running_loop()
+        extended_hours = await loop.run_in_executor(
+            None, fetch_extended_hours_info, symbol_upper, saham_obj.market
+        )
+        if extended_hours is not None:
+            response["extended_hours"] = extended_hours
+
+        return response
     except HTTPException:
         raise
     except Exception as e:

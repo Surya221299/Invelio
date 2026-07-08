@@ -14,6 +14,7 @@ struct StockSummaryDTO: Decodable {
     let price:      Double
     let change:     Double
     let pct_change: Double
+    let market:     String?   // optional: endpoint lama yang belum kirim field ini tetap aman
 }
 
 struct CandleDTO: Decodable {
@@ -28,7 +29,7 @@ struct CandleDTO: Decodable {
 struct StockDetailDTO: Decodable {
     let symbol:               String
     let name:                 String?
-    let sector:               String?
+    let sector:                String?
     let sentiment:            String
     let emitent_ai_summarize: String
     let price:                Double
@@ -36,6 +37,7 @@ struct StockDetailDTO: Decodable {
     let pct_change:           Double
     let score:                Double?
     let updatedAt:            Date?
+    let market:               String?   // optional: sama alasannya dengan StockSummaryDTO
 
     enum CodingKeys: String, CodingKey {
         case symbol               = "kode_saham"
@@ -43,7 +45,7 @@ struct StockDetailDTO: Decodable {
         case sector               = "sektor"
         case sentiment            = "rekomendasi"
         case emitent_ai_summarize = "alasan"
-        case price, change, pct_change
+        case price, change, pct_change, market
         case score                = "skor_total"
         case updatedAt            = "updated_at"
     }

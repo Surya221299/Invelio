@@ -19,11 +19,9 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
     @Published private(set) var errorMessage: String?
     @Published var selectedRange: TimeRange = .oneDay
 
-    // MARK: - Live price streaming (WebSocket)
+    // MARK: - Live price streaming (single source of truth, shared dengan HomeView)
 
-    /// Streamer di-expose sebagai @Published object supaya View bisa observe
-    /// `.latest` miliknya langsung, tanpa perlu proxy properti tambahan di sini.
-    @Published var priceStreamer = StockPriceStreamer()
+    let livePriceStore = LivePriceStore.shared
 
     // MARK: - Earnings & Rally Streak
 
@@ -60,6 +58,7 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
 
     private let fetchChartUseCase: FetchChartDataUseCase
     private let detailRepository:  StockDetailRepositoryProtocol
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Init
 
@@ -69,6 +68,16 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
         self.item              = item
         self.fetchChartUseCase = fetchChartUseCase
         self.detailRepository  = detailRepository
+
+        // Forward perubahan dari LivePriceStore (nested ObservableObject) ke
+        // objectWillChange milik ViewModel ini. Tanpa ini, update harga
+        // internal LivePriceStore TIDAK akan memicu re-render otomatis pada
+        // View yang cuma observe StockDetailViewModel — nested @Published
+        // object tidak cascade objectWillChange-nya secara otomatis di
+        // Combine/SwiftUI.
+        livePriceStore.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Public Actions
@@ -91,18 +100,35 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
 
     // MARK: - Live price streaming
 
-    /// Harga terkini: prioritaskan update dari WebSocket (near-real-time),
-    /// fallback ke candle terakhir kalau stream belum/ tidak terkoneksi.
+    /// Harga terkini: prioritaskan update dari LivePriceStore (near-real-time,
+    /// sumber yang SAMA persis dengan yang dipakai HomeView), fallback ke
+    /// candle terakhir kalau belum ada update masuk untuk simbol ini.
     var streamedOrLatestPrice: Double {
-        priceStreamer.latest?.price ?? latestPrice
+        if let live = livePriceStore.price(for: item.symbol), live.price > 0 {
+            return live.price
+        }
+        return latestPrice
+    }
+
+    /// Change amount/persen yang sesuai dengan `streamedOrLatestPrice` — dari
+    /// harga regular market (BUKAN extended hours; harga utama sengaja tetap
+    /// closing regular market, data pre/post/overnight cuma tampil di badge
+    /// terpisah — lihat ExtendedHoursBadgeView). `nil` kalau belum ada update
+    /// sama sekali dari LivePriceStore (View fallback ke snapshot awal).
+    var streamedChange: Double? {
+        livePriceStore.price(for: item.symbol)?.change
+    }
+
+    var streamedPctChange: Double? {
+        livePriceStore.price(for: item.symbol)?.pctChange
     }
 
     func startPriceStream() {
-        priceStreamer.connect(symbol: item.symbol)
+        livePriceStore.acquire()
     }
 
     func stopPriceStream() {
-        priceStreamer.disconnect()
+        livePriceStore.release()
     }
 
     /// Ambil jadwal earnings & rally streak. Dipanggil sekali saat halaman

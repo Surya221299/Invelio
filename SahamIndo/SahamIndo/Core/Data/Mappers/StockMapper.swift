@@ -20,7 +20,8 @@ enum StockMapper {
             name:          dto.name,
             price:         dto.price,
             change:        dto.change,
-            percentChange: dto.pct_change
+            percentChange: dto.pct_change,
+            market:        dto.market ?? "IDX"
         )
     }
 
@@ -43,7 +44,8 @@ enum StockMapper {
             price:          dto.price,
             change:         dto.change,
             percentChange:  dto.pct_change,
-            updatedAt:      dto.updatedAt
+            updatedAt:      dto.updatedAt,
+            market:         dto.market ?? "IDX"
         )
     }
 

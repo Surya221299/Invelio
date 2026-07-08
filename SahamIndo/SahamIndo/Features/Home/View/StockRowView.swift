@@ -20,6 +20,13 @@ struct StockRowView: View {
         chartRepository: DIContainer.shared.chartRepository
     )
 
+    // Single source of truth harga live — dipakai juga untuk badge pre/post-market.
+    @ObservedObject private var livePriceStore = LivePriceStore.shared
+
+    private var extendedHours: ExtendedHoursUpdate? {
+        livePriceStore.price(for: stock.symbol)?.extendedHours
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             StockAvatarView(symbol: stock.symbol)
@@ -30,17 +37,25 @@ struct StockRowView: View {
                 }
                 Text(stock.name ?? "-").font(.caption).foregroundColor(.secondary).lineLimit(1)
                 SentimentBarView(sentiment: stock.sentiment).frame(width: DesignSize.sentimentBarMaxWidth)
+                // Badge pre-market/after-hours — cuma muncul untuk NASDAQ/NYSE/ETF
+                // dan cuma kalau memang sedang dalam sesi itu (lihat ExtendedHoursBadgeView).
+                ExtendedHoursBadgeView(data: extendedHours, style: .compact)
             }
             .layoutPriority(1)
             Spacer(minLength: 0)
             MiniSparklineView(vm: sparklineVM)
                 .frame(width: DesignSize.sparklineWidth, height: DesignSize.sparklineHeight).padding(.trailing, 8)
-            // Use live candle price when available; fall back to API snapshot while loading.
-            let liveReady = sparklineVM.livePrice > 0
+            // PRIORITAS: `stock.price` sekarang datang dari WebSocket streaming
+            // (lihat HomeViewModel.liveStocks, update tiap ~5 detik) — jauh lebih
+            // fresh daripada `sparklineVM.livePrice` yang cuma refresh tiap 5 menit
+            // (candle chart). Fallback ke sparkline HANYA kalau stock.price belum
+            // ada sama sekali (mis. detik pertama sebelum REST fetch awal selesai).
+            let liveReady = stock.price > 0
             PriceBadgeView(
-                price:         liveReady ? sparklineVM.livePrice    : stock.price,
-                change:        liveReady ? sparklineVM.liveChange   : stock.change,
-                percentChange: liveReady ? sparklineVM.livePctChange : stock.percentChange
+                price:         liveReady ? stock.price          : sparklineVM.livePrice,
+                change:        liveReady ? stock.change         : sparklineVM.liveChange,
+                percentChange: liveReady ? stock.percentChange  : sparklineVM.livePctChange,
+                market:        stock.market
             )
             .fixedSize(horizontal: true, vertical: false)
         }
@@ -58,11 +73,14 @@ struct PriceBadgeView: View {
     let price: Double
     let change: Double
     let percentChange: Double
+    /// "IDX" | "NASDAQ" | "NYSE" | "ETF" — default "IDX" biar call-site lama
+    /// (kalau ada yang belum di-update) tetap kompile tanpa error.
+    var market: String = "IDX"
     private var isPositive: Bool { change >= 0 }
     private var color: Color { isPositive ? Color.ProfitGreen : Color.LossRed }
     var body: some View {
         VStack(alignment: .trailing, spacing: 2) {
-            Text(formatIDR(price))
+            Text(formatPrice(price, market: market))
                 .font(.system(size: 16, weight: .semibold)).lineLimit(1).fixedSize(horizontal: true, vertical: false)
             HStack(spacing: 2) {
                 Image(systemName: isPositive ? "arrow.up.right" : "arrow.down.forward")

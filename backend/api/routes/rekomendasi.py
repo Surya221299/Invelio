@@ -184,6 +184,7 @@ async def get_rekomendasi_saham(
             "price": price,
             "change": change,
             "pct_change": pct_change,
+            "market": saham_obj.market,
         }
 
     except HTTPException:

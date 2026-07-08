@@ -125,7 +125,7 @@ struct SearchView: View {
                 isAnalyzing: vm.analyzingKode == result.kode,
                 anyAnalyzing: vm.analyzingKode != nil
             ) {
-                Task { await vm.analyze(kode: result.kode) }
+                Task { await vm.analyze(kode: result.kode, market: result.market, nama: result.nama) }
             } onToggleWatchlist: {
                 Task {
                     if result.isWatchlist { await vm.removeFromWatchlist(kode: result.kode) }

@@ -23,7 +23,7 @@ enum APIEndpoint {
     /// Search universe simbol_referensi (ringan, ribuan NASDAQ+ETF+IDX)
     case searchSymbols(query: String, limit: Int)
     /// Analisis AI on-demand untuk satu saham (tidak otomatis masuk watchlist)
-    case analyzeSaham(kode: String)
+    case analyzeSaham(kode: String, market: String? = nil, nama: String? = nil)
     /// Tambah saham ke watchlist aktif scheduler
     case addWatchlist(kode: String)
     /// Hapus saham dari watchlist
@@ -54,7 +54,17 @@ enum APIEndpoint {
         case .searchSymbols(let q, let lim):
             let encoded = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
             return "/api/saham/search?q=\(encoded)&limit=\(lim)"
-        case .analyzeSaham(let kode):          return "/api/saham/\(kode)/analyze"
+        case .analyzeSaham(let kode, let market, let nama):
+            var path = "/api/saham/\(kode)/analyze"
+            var query: [String] = []
+            if let market, let encoded = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                query.append("market=\(encoded)")
+            }
+            if let nama, let encoded = nama.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                query.append("nama=\(encoded)")
+            }
+            if !query.isEmpty { path += "?" + query.joined(separator: "&") }
+            return path
         case .addWatchlist(let kode):          return "/api/saham/\(kode)/watchlist"
         case .removeWatchlist(let kode):       return "/api/saham/\(kode)/watchlist"
         case .earnings(let s):                 return "/saham/\(s)/earnings"
@@ -105,7 +115,7 @@ final class APIClient {
         "http://100.118.29.16:8080",
         "http://100.70.203.11:8080",
     ]
-    private static let fallbackURL = "http://192.168.0.106:8080"
+    private static let fallbackURL = "http://10.67.49.26:8080"
 
     static func resolveBaseURL() async -> String {
         if let cached = resolvedBaseURL { return cached }

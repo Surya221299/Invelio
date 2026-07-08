@@ -38,6 +38,10 @@ final class StockCacheManager {
     private struct StockCache: Codable {
         let symbol: String; let name: String?
         let price: Double; let change: Double; let pctChange: Double
+        /// "IDX" | "NASDAQ" | "NYSE" | "ETF". Optional decode supaya cache LAMA
+        /// (yang disimpan sebelum field ini ada) tidak gagal decode — cuma
+        /// fallback ke "IDX" kalau tidak ada di data yang tersimpan.
+        let market: String?
     }
 
     private struct CandleCache: Codable {
@@ -49,7 +53,8 @@ final class StockCacheManager {
 
     func save(stocks: [Stock]) {
         let list = stocks.map { StockCache(symbol: $0.symbol, name: $0.name,
-                                           price: $0.price, change: $0.change, pctChange: $0.percentChange) }
+                                           price: $0.price, change: $0.change, pctChange: $0.percentChange,
+                                           market: $0.market) }
         guard let data = try? JSONEncoder().encode(list) else { return }
         defaults.set(data, forKey: Key.allStocks)
         defaults.set(Date().timeIntervalSince1970, forKey: Key.allStocksTimestamp)
@@ -61,7 +66,8 @@ final class StockCacheManager {
 
         let age   = Date().timeIntervalSince1970 - defaults.double(forKey: Key.allStocksTimestamp)
         let result = list.map { Stock(id: $0.symbol, symbol: $0.symbol, name: $0.name,
-                                      price: $0.price, change: $0.change, percentChange: $0.pctChange) }
+                                      price: $0.price, change: $0.change, percentChange: $0.pctChange,
+                                      market: $0.market ?? "IDX") }
         return (result, age > freshnessInterval)
     }
 

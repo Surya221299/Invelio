@@ -65,7 +65,8 @@ final class FetchStocksUseCase {
                 change:        change,
                 percentChange: percentChange,
                 quantity:      holdingMap[symbol]?.quantity ?? 0,
-                sentiment:     sentiment
+                sentiment:     sentiment,
+                market:        detail?.market ?? stock.market
             )
         }
 

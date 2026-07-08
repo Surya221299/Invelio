@@ -24,6 +24,23 @@ struct HomeView: View {
     @EnvironmentObject private var router:      Router
     @StateObject private var watchlistStore = WatchlistStore()
 
+    // Observe LivePriceStore LANGSUNG (bukan cuma lewat homeVM.objectWillChange
+    // forwarding) — jaminan tambahan supaya body benar-benar re-render tiap
+    // ada harga baru, terlepas dari behavior forwarding di HomeViewModel.
+    @ObservedObject private var livePriceStore = LivePriceStore.shared
+
+    /// `homeVM.liveStocks` disaring sesuai tab watchlist yang aktif.
+    /// "idx" → cuma saham IDX. "us" → cuma NASDAQ/NYSE/ETF (semua yang bukan
+    /// IDX). "all" (Semua) atau tab custom lain (belum ada fitur assign
+    /// saham ke tab custom) → tampilkan semua, tidak difilter.
+    private var filteredStocks: [PortfolioItem] {
+        switch watchlistStore.activeID {
+        case "idx": return homeVM.liveStocks.filter { $0.market.uppercased() == "IDX" }
+        case "us":  return homeVM.liveStocks.filter { $0.market.uppercased() != "IDX" }
+        default:    return homeVM.liveStocks
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
@@ -48,7 +65,7 @@ struct HomeView: View {
                     .padding(.horizontal)
 
                 StockListView(
-                    items: homeVM.stocks,
+                    items: filteredStocks,
                     onTap: { router.push(.stockDetail($0)) }
                 )
 
@@ -67,7 +84,11 @@ struct HomeView: View {
             await homeVM.loadInsights()
         }
         .task { await notifVM.checkForAlerts() }
-        .onAppear { configureSegmentedAppearance() }
+        .onAppear {
+            configureSegmentedAppearance()
+            homeVM.startPriceStream()
+        }
+        .onDisappear { homeVM.stopPriceStream() }
     }
 
     // MARK: - Sub-views
@@ -179,14 +200,27 @@ struct StockListView: View {
     let items: [PortfolioItem]
     let onTap: (PortfolioItem) -> Void
     var body: some View {
-        LazyVStack(spacing: 0) {
-            ForEach(items) { item in
-                VStack(spacing: 0) {
-                    StockRowView(stock: item).padding(.horizontal, 16).padding(.vertical, 6)
-                    Divider().padding(.horizontal, 16)
+        if items.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "tray")
+                    .font(.system(size: 28))
+                    .foregroundColor(.secondary.opacity(0.5))
+                Text("Belum ada saham di kategori ini.")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 40)
+        } else {
+            LazyVStack(spacing: 0) {
+                ForEach(items) { item in
+                    VStack(spacing: 0) {
+                        StockRowView(stock: item).padding(.horizontal, 16).padding(.vertical, 6)
+                        Divider().padding(.horizontal, 16)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { onTap(item) }
                 }
-                .contentShape(Rectangle())
-                .onTapGesture { onTap(item) }
             }
         }
     }

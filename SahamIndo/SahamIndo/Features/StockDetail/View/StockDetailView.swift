@@ -16,6 +16,13 @@ struct StockDetailView: View {
 
     @ObservedObject var viewModel: StockDetailViewModel
 
+    // Single source of truth (sama persis dengan yang dipakai HomeView).
+    // Diobservasi LANGSUNG di sini (bukan cuma lewat viewModel.objectWillChange
+    // forwarding) sebagai jaminan tambahan — nested @Published object di
+    // dalam ObservableObject lain tidak selalu cascade re-render, jadi observe
+    // langsung ke singleton-nya lebih pasti.
+    @ObservedObject private var livePriceStore = LivePriceStore.shared
+
     @EnvironmentObject private var portfolioVM: PortfolioViewModel
     @EnvironmentObject private var router:      Router
 
@@ -29,6 +36,18 @@ struct StockDetailView: View {
 
     // MARK: - Computed display values (change during drag)
 
+    /// Market saham ini — dipakai untuk format harga yang benar (IDX tanpa
+    /// desimal, non-IDX 2 desimal). `detail` (async) diprioritaskan, fallback
+    /// ke `item.market` yang sudah tersedia sejak awal.
+    private var market: String { viewModel.detail?.market ?? viewModel.item.market }
+
+    /// Data pre-market/after-hours dari LivePriceStore (sama sumbernya dengan
+    /// harga streaming) — nil kalau market tidak didukung (IDX) atau lagi
+    /// tidak dalam sesi pre/post-market.
+    private var extendedHours: ExtendedHoursUpdate? {
+        livePriceStore.price(for: viewModel.item.symbol)?.extendedHours
+    }
+
     private var displayPrice: Double {
         // Saat drag di chart, ikut titik yang dipegang jari.
         // Kalau tidak sedang drag, pakai harga streaming (near-real-time)
@@ -36,15 +55,15 @@ struct StockDetailView: View {
         selectedPoint?.close ?? viewModel.streamedOrLatestPrice
     }
     private var displayChange: Double {
-        guard isDragging else { return viewModel.item.change }
+        guard isDragging else { return viewModel.streamedChange ?? viewModel.item.change }
         return displayPrice - viewModel.startPrice
     }
     private var displayChangePct: Double {
-        guard isDragging else { return viewModel.item.percentChange }
+        guard isDragging else { return viewModel.streamedPctChange ?? viewModel.item.percentChange }
         guard viewModel.startPrice != 0 else { return 0 }
         return (displayChange / viewModel.startPrice) * 100
     }
-    private var displayIsPositive: Bool { displayPrice >= viewModel.startPrice }
+    private var displayIsPositive: Bool { isDragging ? displayPrice >= viewModel.startPrice : displayChange >= 0 }
     private var accentColor: Color {
         displayIsPositive ? Color.ProfitGreen : Color.LossRed
     }
@@ -71,10 +90,21 @@ struct StockDetailView: View {
                         accentColor:       accentColor,
                         selectedRange:     viewModel.selectedRange,
                         selectedPoint:     selectedPoint,
-                        isDragging:        isDragging
+                        isDragging:        isDragging,
+                        market:            market
                     )
                     .padding(.horizontal)
                     .animation(.easeInOut(duration: 0.1), value: isDragging)
+
+                    // Badge pre-market/after-hours — cuma muncul untuk NASDAQ/NYSE/ETF
+                    // dan cuma kalau memang sedang dalam sesi itu saat ini.
+                    if !isDragging {
+                        HStack {
+                            ExtendedHoursBadgeView(data: extendedHours, style: .full)
+                            Spacer()
+                        }
+                        .padding(.horizontal)
+                    }
 
                     ChartCanvasView(
                         chartVM:           viewModel,
@@ -82,7 +112,8 @@ struct StockDetailView: View {
                         isDragging:        $isDragging,
                         chartSize:         $chartSize,
                         accentColor:       accentColor,
-                        displayIsPositive: displayIsPositive
+                        displayIsPositive: displayIsPositive,
+                        market:            market
                     )
                     .frame(height: 230)
                     .background(
@@ -225,17 +256,19 @@ struct PriceInfoView: View {
     let selectedRange:     TimeRange
     let selectedPoint:     StockDataPoint?
     let isDragging:        Bool
+    /// "IDX" | "NASDAQ" | "NYSE" | "ETF" — default "IDX" untuk backward-compat.
+    var market:            String = "IDX"
 
     var body: some View {
         HStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 6) {
-                RollingPriceView(price: displayPrice, fontSize: 34, isInteractive: isDragging)
+                RollingPriceView(price: displayPrice, fontSize: 34, isInteractive: isDragging, market: market)
                     .frame(height: 34 * 1.25)
                 HStack(spacing: 6) {
                     HStack(spacing: 5) {
                         Image(systemName: displayIsPositive ? "arrow.up.right" : "arrow.down.right")
                             .font(.system(size: 11, weight: .bold))
-                        Text("\(displayIsPositive ? "+" : "")\(formatIDR(displayChange))")
+                        Text("\(displayIsPositive ? "+" : "")\(formatPrice(displayChange, market: market))")
                             .font(.system(size: 13, weight: .semibold))
                         Text("(\(String(format: "%+.2f%%", displayChangePct)))")
                             .font(.system(size: 12, weight: .medium))
@@ -256,7 +289,7 @@ struct PriceInfoView: View {
                     Text(formatDragDate(point.date, range: selectedRange))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.secondary)
-                    Text(formatIDR(point.close))
+                    Text(formatPrice(point.close, market: market))
                         .font(.system(size: 13, weight: .semibold))
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.95)))
@@ -370,6 +403,10 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
     /// When true, the first non-1D load plays a left→right clip reveal instead of
     /// a spring morph. Pass true for Portfolio; false (default) for StockDetailView.
     var revealOnFirstLoad: Bool = false
+    /// "IDX" | "NASDAQ" | "NYSE" | "ETF" — dipakai untuk format label Max/Min.
+    /// Default "IDX" supaya PortfolioHistoryChart (nilai portofolio, selalu
+    /// Rupiah) tidak perlu diubah.
+    var market: String = "IDX"
 
     @State private var animatedData:        AnimatableChartData = .zero
     @State private var oneDayReady:         Bool    = false
@@ -657,12 +694,12 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
             }
 
             // Max / Min labels
-            Text("Max \(formatIDR(maxP))")
+            Text("Max \(formatPrice(maxP, market: market))")
                 .font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
                 .padding(.horizontal, 4).padding(.vertical, 2)
                 .background(Color.appElevatedBackground.opacity(0.85)).cornerRadius(4)
                 .position(x: chartSize.width - 34, y: yMax - 10)
-            Text("Min \(formatIDR(minP))")
+            Text("Min \(formatPrice(minP, market: market))")
                 .font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
                 .padding(.horizontal, 4).padding(.vertical, 2)
                 .background(Color.appCardBackground.opacity(0.85)).cornerRadius(4)
@@ -1412,7 +1449,9 @@ struct MorphingAreaShape: Shape {
 
 struct RollingPriceView: View {
     let price: Double; let fontSize: CGFloat; var isInteractive: Bool = false
-    private var formatted: String { formatIDR(price) }
+    /// "IDX" | "NASDAQ" | "NYSE" | "ETF" — default "IDX" untuk backward-compat.
+    var market: String = "IDX"
+    private var formatted: String { formatPrice(price, market: market) }
     private var tokens: [(id: Int, char: Character)] { Array(formatted.enumerated()).map { ($0.offset, $0.element) } }
 
     var body: some View {

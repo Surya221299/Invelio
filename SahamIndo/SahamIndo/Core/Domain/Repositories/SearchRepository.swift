@@ -15,7 +15,13 @@ protocol SearchRepositoryProtocol {
 
     /// Jalankan analisis AI on-demand untuk 1 saham. LLM lokal (Ollama) —
     /// timeout set panjang (5 menit) karena backend bisa butuh waktu.
-    func analyzeSaham(kode: String) async throws -> AnalyzeResult
+    ///
+    /// PENTING: selalu kirim `market` dari hasil search (SymbolSearchResult
+    /// yang user tap) — JANGAN andalkan backend menebak ulang dari tabel
+    /// referensi. Kalau kode kebetulan tidak ada di situ, backend akan
+    /// default ke IDX yang bisa salah permanen untuk saham non-IDX (lihat
+    /// catatan panjang di analyze.py soal kasus "MU").
+    func analyzeSaham(kode: String, market: String?, nama: String?) async throws -> AnalyzeResult
 
     /// Tambahkan saham ke watchlist aktif scheduler.
     func addToWatchlist(kode: String) async throws -> Bool
@@ -38,9 +44,9 @@ final class SearchRepository: SearchRepositoryProtocol {
         return SearchMapper.toSearchResults(dtos)
     }
 
-    func analyzeSaham(kode: String) async throws -> AnalyzeResult {
+    func analyzeSaham(kode: String, market: String?, nama: String?) async throws -> AnalyzeResult {
         let dto = try await APIClient.request(
-            .analyzeSaham(kode: kode),
+            .analyzeSaham(kode: kode, market: market, nama: nama),
             as: AnalyzeResultDTO.self
         )
         return SearchMapper.toAnalyzeResult(dto)

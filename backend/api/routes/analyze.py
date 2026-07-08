@@ -33,7 +33,12 @@ router = APIRouter(
 
 
 @router.post("/saham/{kode}/analyze")
-async def analyze_saham(kode: str, db: AsyncSession = Depends(get_db_session)):
+async def analyze_saham(
+    kode: str,
+    market: str | None = None,
+    nama: str | None = None,
+    db: AsyncSession = Depends(get_db_session)
+):
     """
     Jalankan analisis on-demand (fundamental + AI scoring) untuk SATU saham,
     biasanya hasil dari search (mis. user ketik "SNPS" lalu klik Analyze).
@@ -41,22 +46,45 @@ async def analyze_saham(kode: str, db: AsyncSession = Depends(get_db_session)):
     Saham TIDAK otomatis masuk watchlist — ini cuma snapshot sekali jalan.
     Kalau saham sudah ada di watchlist, endpoint ini berfungsi sebagai
     refresh manual untuk saham tersebut saja.
+
+    Args:
+        market, nama: SEBAIKNYA dikirim dari client (Swift search screen
+            sudah tahu ini dari hasil pencarian `SimbolReferensi`). Kalau
+            tidak dikirim, backend coba re-lookup dari tabel referensi —
+            TAPI ini fallback yang rapuh: kalau kode-nya kebetulan tidak ada
+            di tabel referensi (atau ambigu), market akan salah default ke
+            IDX dan bikin simbol yfinance salah (mis. "MU" jadi "MU.JK"
+            padahal MU itu NASDAQ) — kesalahan yang lalu TERSIMPAN PERMANEN
+            di tabel `saham` dan bikin semua job terjadwal gagal fetch
+            berulang-ulang untuk saham itu. Makanya lebih diutamakan client
+            yang kirim market eksplisit.
     """
     kode_clean = kode.strip().upper()
 
-    # Cari metadata dari universe referensi dulu (kalau ada), supaya nama/sektor
-    # terisi otomatis daripada cuma jadi "Unknown"
-    res_ref = await db.execute(select(SimbolReferensi).where(SimbolReferensi.kode == kode_clean))
-    ref = res_ref.scalar_one_or_none()
+    market_final = market
+    nama_final = nama
 
-    market = ref.market if ref else "IDX"
-    nama = ref.nama if ref else None
+    # Fallback: cuma re-lookup dari referensi kalau client TIDAK mengirim
+    # market eksplisit (backward-compat untuk client lama).
+    if not market_final:
+        res_ref = await db.execute(select(SimbolReferensi).where(SimbolReferensi.kode == kode_clean))
+        ref = res_ref.scalar_one_or_none()
+        if ref:
+            market_final = ref.market
+            nama_final = nama_final or ref.nama
+        else:
+            logger.warning(
+                f"⚠️ Analyze {kode_clean}: market tidak dikirim client DAN tidak "
+                f"ditemukan di simbol_referensi — default ke IDX. Ini berisiko "
+                f"salah kalau kode-nya sebenarnya saham NASDAQ/NYSE/ETF."
+            )
+            market_final = "IDX"
 
     try:
         hasil = await analyze_single_saham(
             kode_clean,
-            market=market,
-            nama_perusahaan=nama,
+            market=market_final,
+            nama_perusahaan=nama_final,
         )
         return hasil
     except Exception as e:

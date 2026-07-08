@@ -18,6 +18,30 @@ final class HomeViewModel: ObservableObject {
     @Published private(set) var isLoading: Bool          = false
     @Published private(set) var insightChips: [InsightChip] = HomeViewModel.defaultChips()
 
+    // MARK: - Live Price Streaming (single source of truth, shared dengan StockDetailView)
+
+    let livePriceStore = LivePriceStore.shared
+    private var cancellables = Set<AnyCancellable>()
+
+    /// `stocks`, tapi harga/perubahan-nya ditimpa dengan update terbaru dari
+    /// LivePriceStore kalau ada (near-real-time). View sebaiknya pakai
+    /// properti ini untuk ditampilkan, bukan `stocks` langsung.
+    var liveStocks: [PortfolioItem] {
+        stocks.map { item in
+            guard let live = livePriceStore.price(for: item.symbol) else { return item }
+            return PortfolioItem(
+                symbol:        item.symbol,
+                name:          item.name,
+                price:         live.price,
+                change:        live.change,
+                percentChange: live.pctChange,
+                quantity:      item.quantity,
+                sentiment:     item.sentiment,
+                market:        item.market
+            )
+        }
+    }
+
     // MARK: - Dependencies (injected via DI)
 
     private let fetchStocksUseCase: FetchStocksUseCase
@@ -34,6 +58,24 @@ final class HomeViewModel: ObservableObject {
         self.fetchStocksUseCase = fetchStocksUseCase
         self.insightRepository  = insightRepository
         self.chartRepository    = chartRepository
+
+        // Forward perubahan dari LivePriceStore supaya View yang observe
+        // HomeViewModel (lewat @EnvironmentObject) ikut re-render tiap ada
+        // harga baru dari WebSocket — nested @Published object tidak
+        // otomatis cascade objectWillChange-nya, jadi di-forward manual.
+        livePriceStore.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+    }
+
+    // MARK: - Live Price Streaming
+
+    func startPriceStream() {
+        livePriceStore.acquire()
+    }
+
+    func stopPriceStream() {
+        livePriceStore.release()
     }
 
     // MARK: - Public Actions
@@ -84,5 +126,3 @@ final class HomeViewModel: ObservableObject {
                     text: "Rupiah menguat ke **Rp 15.820/USD** didukung surplus neraca dagang.")
     ]}
 }
-
-

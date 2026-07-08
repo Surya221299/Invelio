@@ -83,7 +83,11 @@ final class SearchViewModel: ObservableObject {
 
     /// Jalankan analisis AI on-demand untuk satu saham.
     /// Tombol Analyze di-disable selama ini berjalan (backend pakai scoring_lock global).
-    func analyze(kode: String) async {
+    ///
+    /// `market`/`nama` WAJIB dikirim dari hasil search (`SymbolSearchResult`
+    /// yang user tap) — backend tidak lagi menebak ulang market kalau ini
+    /// dikirim, supaya tidak salah default ke IDX untuk saham non-IDX.
+    func analyze(kode: String, market: Market, nama: String) async {
         guard analyzingKode == nil else {
             errorMessage = "Analisis '\(analyzingKode ?? "")' sedang berjalan. Tunggu sebentar."
             return
@@ -92,7 +96,7 @@ final class SearchViewModel: ObservableObject {
         errorMessage  = nil
 
         do {
-            let result = try await repo.analyzeSaham(kode: kode)
+            let result = try await repo.analyzeSaham(kode: kode, market: market.rawValue, nama: nama)
             analyzeResult = result
             // Update badge is_watchlist di hasil search tanpa fetch ulang
             updateWatchlistBadge(kode: kode, isWatchlist: result.isWatchlist)

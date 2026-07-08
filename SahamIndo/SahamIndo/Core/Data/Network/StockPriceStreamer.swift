@@ -79,7 +79,11 @@ final class StockPriceStreamer: ObservableObject {
                 case .success(let message):
                     if case .string(let text) = message,
                        let data = text.data(using: .utf8),
-                       let update = try? JSONDecoder().decode(StockPriceUpdate.self, from: data) {
+                       let update = try? JSONDecoder().decode(StockPriceUpdate.self, from: data),
+                       update.price > 0 {
+                        // Jaga-jaga: abaikan payload dengan harga 0/negatif (sentinel
+                        // kegagalan fetch di backend) supaya tidak menimpa harga valid
+                        // terakhir yang sudah ditampilkan.
                         self.latest = update
                     }
                     self.listen() // lanjut dengar pesan berikutnya

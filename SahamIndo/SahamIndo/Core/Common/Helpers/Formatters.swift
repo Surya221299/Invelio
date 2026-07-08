@@ -26,6 +26,20 @@ func formatIDRShort(_ value: Double) -> String {
     return String(format: "%.0f", value)
 }
 
+// MARK: - Market-Aware Price Formatting
+
+/// Format harga sesuai konvensi market asalnya:
+/// - IDX: tanpa desimal (mis. "9.850") — harga saham IDX memang bulat (kelipatan tick size).
+/// - NASDAQ/NYSE/ETF: 2 desimal (mis. "197,53") — harga saham AS umumnya pakai sen.
+///
+/// Dipakai di mana pun harga ditampilkan (list saham, detail saham) supaya
+/// konsisten — sebelumnya saham AS ikut format IDX (dibulatkan ke integer,
+/// mis. "197" padahal harga aslinya "197.53").
+func formatPrice(_ value: Double, market: String) -> String {
+    let decimals = market.uppercased() == "IDX" ? 0 : 2
+    return formatIDR(value, decimals: decimals)
+}
+
 // MARK: - Relative Time
 func timeAgoString(from date: Date, now: Date = Date()) -> String {
     let diff = Int(now.timeIntervalSince(date))

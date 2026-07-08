@@ -25,7 +25,16 @@ struct WatchlistTab: Identifiable, Codable, Equatable {
 final class WatchlistStore: ObservableObject {
 
     @Published private(set) var tabs:      [WatchlistTab]
-    @Published              var activeID:  String
+    @Published              var activeID:  String {
+        didSet {
+            // Auto-persist tiap kali activeID berubah — termasuk pas user
+            // cuma TAP tab yang sudah ada (bukan cuma addTab/deleteTab).
+            // Tanpa ini, "ingat tab terakhir" tidak akan pernah benar-benar
+            // jalan untuk kasus tap biasa.
+            guard oldValue != activeID else { return }
+            persist()
+        }
+    }
 
     private let tabsKey   = "watchlist_tabs_v1"
     private let activeKey = "watchlist_active_v1"
@@ -39,10 +48,15 @@ final class WatchlistStore: ObservableObject {
         } else {
             loadedTabs = WatchlistTab.defaultTabs
         }
-        let savedActive = UserDefaults.standard.string(forKey: "watchlist_active_v1")
+        tabs = loadedTabs
+
+        // Restore tab terakhir yang aktif dari UserDefaults (kalau ada dan
+        // masih valid — id-nya masih ada di daftar tabs saat ini). Kalau
+        // belum pernah pilih apa-apa (install baru) atau tab yang terakhir
+        // dipilih sudah dihapus, fallback ke tab "Semua".
+        let savedActive = UserDefaults.standard.string(forKey: activeKey)
         let validActive = savedActive.flatMap { id in loadedTabs.first { $0.id == id }?.id }
-        tabs     = loadedTabs
-        activeID = validActive ?? loadedTabs[0].id
+        activeID = validActive ?? (loadedTabs.first { $0.id == "all" }?.id ?? loadedTabs[0].id)
     }
 
     func addTab(name: String) {
