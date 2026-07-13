@@ -13,9 +13,10 @@ struct WatchlistTab: Identifiable, Codable, Equatable {
     var name: String
 
     static let defaultTabs: [WatchlistTab] = [
-        WatchlistTab(id: "all",   name: "Semua"),
-        WatchlistTab(id: "idx",   name: "IDX"),
-        WatchlistTab(id: "us",    name: "US"),
+        WatchlistTab(id: "all",    name: "Semua"),
+        WatchlistTab(id: "idx",    name: "IDX"),
+        WatchlistTab(id: "us",     name: "US"),
+        WatchlistTab(id: "crypto", name: "Crypto"),
     ]
 }
 
@@ -40,13 +41,30 @@ final class WatchlistStore: ObservableObject {
     private let activeKey = "watchlist_active_v1"
 
     init() {
-        let loadedTabs: [WatchlistTab]
+        var loadedTabs: [WatchlistTab]
         if let data = UserDefaults.standard.data(forKey: "watchlist_tabs_v1"),
            let saved = try? JSONDecoder().decode([WatchlistTab].self, from: data),
            !saved.isEmpty {
             loadedTabs = saved
         } else {
             loadedTabs = WatchlistTab.defaultTabs
+        }
+
+        // Migrasi 1: hapus tab custom LAMA yang namanya "Crypto" tapi id-nya
+        // BUKAN "crypto" (id acak/UUID) — ini sisa dari sebelum fitur tab
+        // Crypto spesial ini ada, waktu user bikin watchlist custom manual
+        // bernama "Crypto". Sekarang jadi duplikat, jadi yang lama dibuang,
+        // cukup simpan satu-satunya yang id-nya "crypto".
+        loadedTabs.removeAll { $0.name.caseInsensitiveCompare("Crypto") == .orderedSame && $0.id != "crypto" }
+
+        // Migrasi 2: user yang sudah pernah pakai app SEBELUM fitur tab
+        // "Crypto" spesial ini ada, tab tersimpannya tidak akan otomatis
+        // include tab ini (karena fallback ke defaultTabs cuma kepakai kalau
+        // BELUM ADA data tersimpan sama sekali). Jadi di-insert manual kalau
+        // belum ada (misal karena baru saja dihapus oleh migrasi 1 di atas,
+        // atau memang belum pernah ada sama sekali).
+        if !loadedTabs.contains(where: { $0.id == "crypto" }) {
+            loadedTabs.append(WatchlistTab(id: "crypto", name: "Crypto"))
         }
         tabs = loadedTabs
 
@@ -57,6 +75,8 @@ final class WatchlistStore: ObservableObject {
         let savedActive = UserDefaults.standard.string(forKey: activeKey)
         let validActive = savedActive.flatMap { id in loadedTabs.first { $0.id == id }?.id }
         activeID = validActive ?? (loadedTabs.first { $0.id == "all" }?.id ?? loadedTabs[0].id)
+
+        persist() // simpan hasil migrasi di atas (hapus duplikat &/atau tambah tab crypto)
     }
 
     func addTab(name: String) {

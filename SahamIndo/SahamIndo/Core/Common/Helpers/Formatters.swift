@@ -40,6 +40,17 @@ func formatPrice(_ value: Double, market: String) -> String {
     return formatIDR(value, decimals: decimals)
 }
 
+/// Format harga crypto dengan desimal adaptif — harga crypto rentangnya
+/// ekstrem (BTC puluhan ribu dolar, sebagian coin di bawah $0.0001), jadi
+/// jumlah desimal tetap (kayak formatPrice untuk saham) tidak cocok: kalau
+/// dipatok 2 desimal, coin murah akan selalu tampil "0,00".
+func formatCryptoPrice(_ value: Double) -> String {
+    let absValue = abs(value)
+    if absValue >= 1        { return formatIDR(value, decimals: 2) }
+    if absValue >= 0.01     { return formatIDR(value, decimals: 4) }
+    return formatIDR(value, decimals: 8)
+}
+
 // MARK: - Relative Time
 func timeAgoString(from date: Date, now: Date = Date()) -> String {
     let diff = Int(now.timeIntervalSince(date))

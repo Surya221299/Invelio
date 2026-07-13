@@ -49,11 +49,11 @@ struct HomeView: View {
                     items:    portfolioVM.items,
                     holdings: portfolioVM.holdings
                 )
-                .padding(.top, 12)
-                .padding(.bottom, 20)
+                .padding(.top, 0)
+                .padding(.bottom, 4)
 
                 AIInsightCardView(chips: homeVM.insightChips)
-                    .padding(.vertical, 12)
+                    .padding(.vertical, 4)
 
                 sectionHeader("Watchlist")
 
@@ -64,15 +64,19 @@ struct HomeView: View {
                     .background(Color.PrimaryYellow)
                     .padding(.horizontal)
 
-                StockListView(
-                    items: filteredStocks,
-                    onTap: { router.push(.stockDetail($0)) }
-                )
+                if watchlistStore.activeID == "crypto" {
+                    CryptoWatchlistSectionView()
+                } else {
+                    StockListView(
+                        items: filteredStocks,
+                        onTap: { router.push(.stockDetail($0)) }
+                    )
 
-                // Hint untuk user supaya tahu ada search
-                searchHint
-                    .padding(.top, 8)
-                    .padding(.bottom, 20)
+                    // Hint untuk user supaya tahu ada search
+                    searchHint
+                        .padding(.top, 8)
+                        .padding(.bottom, 20)
+                }
             }
         }
         .background(Color.DarkPurpleAppBackground.ignoresSafeArea())
@@ -110,15 +114,6 @@ struct HomeView: View {
             Spacer()
 
             HStack(spacing: 16) {
-                // Tombol Search — arahkan ke tab Search
-                Button {
-                    router.selectedTab = "search"
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.title3)
-                        .foregroundColor(.primary)
-                }
-
                 NotificationButton(unreadCount: notifVM.unreadCount) {
                     router.push(.notification)
                 }

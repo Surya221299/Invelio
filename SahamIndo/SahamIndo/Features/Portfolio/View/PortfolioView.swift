@@ -129,11 +129,19 @@ struct PortfolioSummaryCardView: View {
     }
 
     var body: some View {
-        VStack(spacing: 16) {
+        // alignment: .leading ditambahkan di sini — sebelumnya VStack ini
+        // tidak punya alignment eksplisit (default .center), jadi grup teks
+        // "Portfolio"/nilai/badge (yang lebih sempit) ke-tengah-tengahkan
+        // relatif terhadap lebar chart di bawahnya (yang full-width card),
+        // meskipun ISI grup teks itu sendiri sudah leading-aligned satu sama
+        // lain. Dengan .leading di sini, seluruh blok grup teks nempel ke
+        // tepi kiri card, sejajar dengan awal chart.
+        VStack(alignment: .leading, spacing: 0) {
             // Total asset + growth badge
-            VStack(spacing: 4) {
-                Text("Nilai Saham")
-                    .font(.caption).foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Total Assets")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 PortfolioValueAnimator()
                 let isPos = displayedGrowthPercent >= 0
                 HStack(spacing: 8) {
@@ -146,20 +154,20 @@ struct PortfolioSummaryCardView: View {
                             .font(.system(size: 12, weight: .bold))
                     }
                     .foregroundColor(isPos ? green : red)
-                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
                     .background((isPos ? green : red).opacity(0.12))
                     .clipShape(Capsule())
                 }
             }
             .animation(.easeOut(duration: 0.15), value: isDragging)
 
-            Divider().background(Color.primary.opacity(0.1))
-
             // Chart section is embedded below, inside the same card
             PortfolioChartSectionView(items: items, holdings: holdings,
                                        selectedPoint: $selectedPoint, isDragging: $isDragging)
         }
-        .padding(16)
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 8)
         .background(cardBg)
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.08), lineWidth: 1))
@@ -183,11 +191,7 @@ struct PortfolioChartSectionView: View {
     private let orange = Color.orange
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Grafik Pertumbuhan Aset")
-                .font(.system(size: 15, weight: .bold))
-                .foregroundColor(.primary)
-
+        VStack(alignment: .leading, spacing: 0) {
             ChartCanvasView(
                 chartVM:           chartVM,
                 selectedPoint:     $selectedPoint,
