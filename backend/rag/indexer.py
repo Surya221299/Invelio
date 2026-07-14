@@ -40,7 +40,6 @@ Catatan:
 
 import asyncio
 import hashlib
-import uuid
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -72,73 +71,6 @@ _COLLECTION_MAP: dict[str, str] = {
     "laporan_keuangan": COLLECTION_LAPORAN,
     "data_makro": COLLECTION_MAKRO,
 }
-
-
-# ============================================================
-# LlamaIndex Custom Embedding Adapter
-# ============================================================
-
-def _get_llama_embedding_model() -> Any:
-    """
-    Buat LlamaIndex-compatible embedding model yang membungkus
-    BGE-M3 singleton dari embedder.py.
-
-    LlamaIndex butuh objek yang mengimplementasikan BaseEmbedding.
-    Kita buat custom class yang mendelegasikan ke BGEEmbedder.
-
-    Returns:
-        LlamaIndex BaseEmbedding instance
-    """
-    from llama_index.core.embeddings import BaseEmbedding
-    from pydantic import PrivateAttr
-
-    class BGEM3LlamaIndexAdapter(BaseEmbedding):
-        """
-        Adapter agar BGE-M3 singleton bisa dipakai oleh LlamaIndex.
-
-        Mendelegasikan semua operasi embedding ke BGEEmbedder singleton
-        yang sudah ada, sehingga model tidak di-load ulang.
-        """
-
-        _embedder: Any = PrivateAttr()
-
-        def __init__(self, **kwargs: Any) -> None:
-            super().__init__(
-                model_name="BAAI/bge-m3",
-                embed_batch_size=32,
-                **kwargs,
-            )
-            self._embedder = get_embedder()
-
-        @classmethod
-        def class_name(cls) -> str:
-            return "BGEM3LlamaIndexAdapter"
-
-        def _get_query_embedding(self, query: str) -> list[float]:
-            """Embed query pencarian."""
-            return self._embedder.encode([query])[0]
-
-        def _get_text_embedding(self, text: str) -> list[float]:
-            """Embed satu teks dokumen."""
-            return self._embedder.encode([text])[0]
-
-        def _get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
-            """Embed batch teks dokumen (lebih efisien)."""
-            return self._embedder.encode(texts)
-
-        # Versi async — delegasi ke sync karena BGE-M3 sudah efisien
-        async def _aget_query_embedding(self, query: str) -> list[float]:
-            return await asyncio.to_thread(self._get_query_embedding, query)
-
-        async def _aget_text_embedding(self, text: str) -> list[float]:
-            return await asyncio.to_thread(self._get_text_embedding, text)
-
-        async def _aget_text_embeddings(
-            self, texts: list[str]
-        ) -> list[list[float]]:
-            return await asyncio.to_thread(self._get_text_embeddings, texts)
-
-    return BGEM3LlamaIndexAdapter()
 
 
 # ============================================================

@@ -83,13 +83,6 @@ enum IDXTradingCalendar {
         return candidate
     }
 
-    /// Hari bursa yang "efektif" untuk `date`:
-    /// - Jika `date` sendiri adalah hari bursa → kembalikan `date`.
-    /// - Jika libur / weekend → kembalikan `previousTradingDay(before: date)`.
-    static func effectiveTradingDay(for date: Date) -> Date {
-        isTradingDay(date) ? date : previousTradingDay(before: date)
-    }
-
     // MARK: - Daftar Hari Libur Bursa IDX
     // Sumber: https://www.idx.co.id/id/tentang-idx/hari-libur/
     // Update setiap awal tahun berdasarkan pengumuman resmi IDX.
@@ -241,31 +234,6 @@ enum IDXTradingCalendar {
 /// Jam sesi perdagangan BEI.
 /// Tetap terpisah dari `IDXTradingCalendar` karena berkaitan dengan **jam**, bukan **hari**.
 extension IDXTradingCalendar {
-
-    static let oneDayTotalSlots  = 87
-    static let oneDayOpenMinutes = 9 * 60   // 09:00 WIB
-
-    /// `true` jika `date` berada dalam menit perdagangan aktif (bukan istirahat, bukan di luar jam).
-    static func isTradingMinute(_ date: Date) -> Bool {
-        guard !isWeekend(date) && !isHoliday(date) else { return false }
-        let cal = jakartaCalendar
-        let h   = cal.component(.hour,   from: date)
-        let m   = cal.component(.minute, from: date)
-        let t   = h * 60 + m
-        guard t >= 9 * 60, t <= 15 * 60 + 59 else { return false }
-        let wd        = cal.component(.weekday, from: date)
-        let (bS, bE)  = breakRange(weekday: wd)
-        return !(t >= bS && t < bE)
-    }
-
-    /// Rentang waktu istirahat sesi bursa berdasarkan hari.
-    static func breakRange(weekday: Int) -> (start: Int, end: Int) {
-        if weekday == 6 {
-            return (start: 11 * 60 + 30, end: 14 * 60)      // Jumat: 11:30–14:00
-        } else {
-            return (start: 12 * 60,      end: 13 * 60 + 30)  // Sen–Kam: 12:00–13:30
-        }
-    }
 
     /// Hari bursa terakhir yang sudah *selesai* sesinya (atau sedang berjalan jika hari ini).
     /// Berguna untuk chart 1D: jika hari ini libur/weekend, kembalikan Jumat (atau hari bursa terakhir).

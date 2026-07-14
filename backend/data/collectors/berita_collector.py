@@ -733,3 +733,89 @@ async def collect_berita_pasar(
     )
 
     return relevant_berita
+
+
+# ============================================================
+# Live Search — dipanggil REAL-TIME saat ada pertanyaan chatbot masuk
+# ============================================================
+#
+# Beda dengan collect_berita()/collect_berita_pasar() (job terjadwal
+# mingguan, hasilnya disimpan ke PostgreSQL lalu di-embed ke ChromaDB),
+# fungsi ini dipanggil LANGSUNG dari chatbot_agent.py tiap ada pertanyaan
+# yang butuh info ter-update (mis. "harga X hari ini", "berita terbaru Y").
+# Hasilnya TIDAK disimpan ke DB — cuma dipakai sebagai konteks tambahan
+# buat menjawab pertanyaan itu saja (mirip cara Claude web-search saat chat).
+#
+# Sengaja dibatasi (max_hasil kecil, tanpa LLM-judge relevansi macam
+# collect_berita_pasar) supaya latency-nya tetap masuk akal untuk
+# response time chatbot — bukan buat kualitas seakurat job mingguan.
+
+async def live_search_berita(
+    query: str,
+    kode_saham: str | None = None,
+    hari_terakhir: int = 3,
+    max_hasil: int = 4,
+) -> list[dict[str, Any]]:
+    """
+    Cari & ambil isi berita TERBARU secara real-time buat konteks chatbot.
+
+    Args:
+        query: Query pencarian (biasanya dari pertanyaan user, atau
+            "{kode_saham} saham berita terbaru" kalau ada saham spesifik).
+        kode_saham: Kode saham terkait, kalau ada (buat metadata saja).
+        hari_terakhir: Cuma ambil berita dalam N hari terakhir.
+        max_hasil: Maksimal berapa artikel yang isinya di-fetch penuh
+            (fetch isi lengkap itu paling lambat, jadi dibatasi ketat).
+
+    Returns:
+        List of dict siap dipakai sebagai konteks LLM:
+        [{"judul", "url", "sumber", "tanggal_publish", "isi"}, ...]
+        List kosong kalau gagal total (dijaga tidak raise exception ke
+        caller, supaya chatbot tetap bisa jawab pakai konteks lain kalau
+        live search-nya gagal/timeout).
+    """
+    try:
+        entries = await _collect_from_google_news(
+            kode_saham=kode_saham,
+            query=query,
+            hari_terakhir=hari_terakhir,
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ Live search gagal ambil RSS Google News untuk '{query}': {e}")
+        return []
+
+    if not entries:
+        logger.info(f"ℹ️ Live search: tidak ada hasil untuk '{query}'")
+        return []
+
+    # Urutkan yang terbaru dulu, ambil beberapa teratas saja
+    entries = sorted(entries, key=lambda e: e["tanggal_publish"], reverse=True)[:max_hasil]
+
+    # Fetch isi semua artikel SECARA PARALEL (bukan satu-satu berurutan) —
+    # penting karena ini dipanggil live saat user nunggu jawaban chatbot.
+    # fetch_article_content masing-masing timeout 15 detik; kalau dilakukan
+    # berurutan, worst-case bisa 15s x max_hasil (bisa 1 menit lebih) —
+    # dengan gather, worst-case cuma ~15 detik total (paralel).
+    async def _fetch_satu(entry: dict[str, Any]) -> dict[str, Any]:
+        try:
+            isi = await fetch_article_content(entry["url"])
+        except Exception as e:
+            logger.warning(f"⚠️ Live search gagal fetch isi artikel '{entry['judul'][:50]}': {e}")
+            isi = ""
+        if not isi or len(isi) < 100:
+            # Isi terlalu pendek/gagal — tetap masukkan judul saja sebagai
+            # sinyal minimal, lebih baik daripada tidak ada apa-apa.
+            isi = entry["judul"]
+        return {
+            "judul":           entry["judul"],
+            "url":             entry["url"],
+            "sumber":          entry["sumber"],
+            "tanggal_publish": entry["tanggal_publish"],
+            "isi":             isi[:2000],  # batasi panjang biar tidak membengkak konteks LLM
+        }
+
+    hasil = await asyncio.gather(*(_fetch_satu(entry) for entry in entries))
+    hasil = list(hasil)
+
+    logger.info(f"🌐 Live search: {len(hasil)} artikel diambil untuk '{query}'")
+    return hasil

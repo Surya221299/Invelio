@@ -7,8 +7,6 @@
 
 import SwiftUI
 
-import SwiftUI
-
 enum DesignFont {
     
     // MARK: - Large Title

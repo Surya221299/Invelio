@@ -131,12 +131,31 @@ struct SearchView: View {
                     if result.isWatchlist { await vm.removeFromWatchlist(kode: result.kode) }
                     else                  { await vm.addToWatchlist(kode: result.kode) }
                 }
+            } onOpenDetail: {
+                router.push(.stockDetail(portfolioItem(from: result)))
             }
             .listRowBackground(Color.DarkPurpleAppBackground)
             .listRowSeparatorTint(Color.white.opacity(0.07))
         }
         .listStyle(.plain)
         .scrollDismissesKeyboard(.immediately)
+    }
+
+    /// PortfolioItem minimal dari hasil search — cukup untuk membuka
+    /// StockDetailView tanpa perlu masuk watchlist dulu. Detail & chart
+    /// di-fetch ulang oleh StockDetailViewModel berdasarkan `symbol`,
+    /// jadi price/quantity awal boleh nol.
+    private func portfolioItem(from result: SymbolSearchResult) -> PortfolioItem {
+        PortfolioItem(
+            symbol:        result.kode,
+            name:          result.nama,
+            price:         0,
+            change:        0,
+            percentChange: 0,
+            quantity:      0,
+            sentiment:     Sentiment.estimated(percentChange: 0),
+            market:        result.market.rawValue
+        )
     }
 }
 
@@ -148,36 +167,40 @@ private struct SearchResultRow: View {
     let anyAnalyzing:   Bool
     let onAnalyze:      () -> Void
     let onToggleWatchlist: () -> Void
+    let onOpenDetail:   () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            // Market badge
-            MarketBadge(market: result.market)
+            // Market badge + Symbol + name — tap untuk buka StockDetailView
+            HStack(spacing: 12) {
+                MarketBadge(market: result.market)
 
-            // Symbol + name
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(result.kode)
-                        .font(.system(.subheadline, design: .monospaced, weight: .bold))
-                        .foregroundColor(.primary)
-                    if result.tipe == "ETF" {
-                        Text("ETF")
-                            .font(.caption2).fontWeight(.semibold)
-                            .padding(.horizontal, 5).padding(.vertical, 2)
-                            .background(Color.purple.opacity(0.25))
-                            .foregroundColor(.purple)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(result.kode)
+                            .font(.system(.subheadline, design: .monospaced, weight: .bold))
+                            .foregroundColor(.primary)
+                        if result.tipe == "ETF" {
+                            Text("ETF")
+                                .font(.caption2).fontWeight(.semibold)
+                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .background(Color.purple.opacity(0.25))
+                                .foregroundColor(.purple)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                        }
+                    }
+                    Text(result.nama)
+                        .font(.caption).foregroundColor(.secondary)
+                        .lineLimit(1)
+                    if let exchange = result.exchange {
+                        Text(exchange).font(.caption2).foregroundColor(.primary)
                     }
                 }
-                Text(result.nama)
-                    .font(.caption).foregroundColor(.secondary)
-                    .lineLimit(1)
-                if let exchange = result.exchange {
-                    Text(exchange).font(.caption2).foregroundColor(.primary)
-                }
-            }
 
-            Spacer()
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onOpenDetail)
 
             // Watchlist star
             Button(action: onToggleWatchlist) {

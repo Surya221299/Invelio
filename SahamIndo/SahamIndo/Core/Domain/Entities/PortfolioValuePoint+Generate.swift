@@ -40,32 +40,6 @@ extension PortfolioValuePoint {
         )
     }
 
-    // MARK: - Per-Emiten Chart (satu holding)
-
-    /// Menghasilkan titik-titik nilai satu holding dari tanggal beli hingga hari ini.
-    static func generateForHolding(
-        item: PortfolioItem,
-        purchaseDate: Date,
-        costBasis: Double
-    ) -> [PortfolioValuePoint] {
-
-        guard item.quantity > 0, costBasis > 0 else { return [] }
-
-        let totalDays = max(
-            Calendar.current.dateComponents([.day], from: purchaseDate, to: Date()).day ?? 1,
-            1
-        )
-        let currentValue = item.value
-
-        return simulateHistory(
-            currentValue: currentValue,
-            days: totalDays,
-            startDate: purchaseDate,
-            volatilityFactor: 0.015,
-            anchorStartValue: costBasis   // titik awal dianker ke cost basis
-        )
-    }
-
     // MARK: - Private Helpers
 
     private static func simulateHistory(

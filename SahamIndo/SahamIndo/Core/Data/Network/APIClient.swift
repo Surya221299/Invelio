@@ -115,7 +115,7 @@ final class APIClient {
         "http://100.118.29.16:8080",
         "http://100.70.203.11:8080",
     ]
-    private static let fallbackURL = "http://10.67.50.109:8080"
+    private static let fallbackURL = "http://192.168.0.106:8080"
 
     static func resolveBaseURL() async -> String {
         if let cached = resolvedBaseURL { return cached }

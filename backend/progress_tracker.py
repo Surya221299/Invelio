@@ -19,10 +19,6 @@ def set_progress(job_name: str, percent: int, status: str = "running", message: 
                 "message": message
             }
 
-def get_progress(job_name: str) -> Dict[str, Any]:
-    with _lock:
-        return _progress.get(job_name, {"percent": 0, "status": "idle", "message": "Tidak diketahui"})
-
 def get_all_progress() -> Dict[str, Dict[str, Any]]:
     with _lock:
         return dict(_progress)

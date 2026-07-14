@@ -185,25 +185,3 @@ async def collect_xbrl_fundamental(kode_saham: str, period: str = "Audit") -> Di
         
     logger.warning(f"⚠️ Tidak ditemukan laporan keuangan XBRL untuk {kode_clean} dalam 3 tahun terakhir")
     return None
-
-async def collect_xbrl_fundamental_batch(kode_saham_list: list[str], period: str = "Audit") -> list[dict[str, Any]]:
-    """
-    Mengambil data fundamental XBRL untuk daftar emiten secara berurutan dengan rate-limiting.
-    """
-    logger.info(f"📊 Mulai mengumpulkan data XBRL IDX untuk {len(kode_saham_list)} saham...")
-    results = []
-    
-    for i, kode in enumerate(kode_saham_list):
-        try:
-            data = await collect_xbrl_fundamental(kode, period)
-            if data:
-                results.append(data)
-        except Exception as e:
-            logger.error(f"❌ Error batch XBRL untuk {kode}: {e}")
-            
-        # Rate limit delay
-        if i < len(kode_saham_list) - 1:
-            await asyncio.sleep(2.0)
-            
-    logger.info(f"📊 Selesai batch XBRL: {len(results)}/{len(kode_saham_list)} emiten berhasil.")
-    return results

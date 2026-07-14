@@ -89,6 +89,7 @@ from backend.db.postgres import (
     async_session,
 )
 from backend.rag.retriever import retrieve, retrieve_multi_saham
+from backend.data.collectors.berita_collector import live_search_berita
 
 # Timezone WIB
 _WIB = timezone(timedelta(hours=7))
@@ -359,6 +360,85 @@ def _route_setelah_klasifikasi(state: ChatState) -> str:
 # NODE 2: Ambil Konteks
 # ============================================================
 
+# Kata kunci yang menandakan pertanyaan butuh info TER-UPDATE (bukan cuma
+# data historis yang sudah ada di ChromaDB/PostgreSQL dari job mingguan).
+_FRESHNESS_KEYWORDS = [
+    "hari ini", "sekarang", "saat ini", "terkini", "terbaru", "barusan",
+    "minggu ini", "kemarin", "real-time", "realtime", "live", "update terbaru",
+    "berita terbaru", "kabar terbaru",
+]
+
+
+def _butuh_live_search(pertanyaan: str, jumlah_dokumen_chromadb: int) -> bool:
+    """
+    Tentukan apakah pertanyaan ini perlu live web search tambahan.
+
+    Dipicu kalau:
+    1. Pertanyaan eksplisit minta info ter-update (ada freshness keyword), ATAU
+    2. ChromaDB sama sekali tidak punya dokumen relevan (fallback — daripada
+       chatbot jawab "tidak tahu", coba cari langsung dari web).
+    """
+    pertanyaan_lower = pertanyaan.lower()
+    ada_freshness_keyword = any(kw in pertanyaan_lower for kw in _FRESHNESS_KEYWORDS)
+    return ada_freshness_keyword or jumlah_dokumen_chromadb == 0
+
+
+async def _live_web_search_untuk_pertanyaan(
+    pertanyaan: str,
+    saham_list: list[str],
+) -> list[dict[str, Any]]:
+    """
+    Jalankan live_search_berita() dan format hasilnya supaya bentuknya SAMA
+    PERSIS dengan output retrieve() (ChromaDB) — {"teks", "metadata",
+    "skor_relevansi"} — supaya generate_jawaban() tidak perlu tahu bedanya
+    dokumen ini datang dari ChromaDB atau dari live search.
+
+    Kalau ada saham spesifik disebut, cari per-saham (lebih presisi).
+    Kalau tidak, cari berdasarkan pertanyaan apa adanya.
+    """
+    semua_hasil: list[dict[str, Any]] = []
+
+    try:
+        if saham_list:
+            for kode in saham_list[:2]:  # batasi max 2 saham biar tidak terlalu lama
+                artikel = await live_search_berita(
+                    query=f"{kode} saham berita terbaru",
+                    kode_saham=kode,
+                    hari_terakhir=3,
+                    max_hasil=3,
+                )
+                semua_hasil.extend(artikel)
+        else:
+            artikel = await live_search_berita(
+                query=pertanyaan,
+                kode_saham=None,
+                hari_terakhir=3,
+                max_hasil=4,
+            )
+            semua_hasil.extend(artikel)
+    except Exception as e:
+        logger.error(f"   ❌ Live web search gagal total: {type(e).__name__}: {e}")
+        return []
+
+    # Format ke bentuk yang sama dengan hasil retrieve() ChromaDB
+    dokumen_terformat: list[dict[str, Any]] = []
+    for artikel in semua_hasil:
+        dokumen_terformat.append({
+            "teks": f"{artikel['judul']}\n\n{artikel['isi']}",
+            "metadata": {
+                "sumber":   artikel["sumber"],
+                "url":      artikel["url"],
+                "tanggal":  artikel["tanggal_publish"].isoformat() if artikel["tanggal_publish"] else None,
+                "asal":     "live_search",  # penanda: ini BUKAN dari ChromaDB
+            },
+            # Skor tetap tinggi (bukan hasil similarity search) karena ini
+            # hasil pencarian langsung yang sudah difilter relevan by design.
+            "skor_relevansi": 0.9,
+        })
+
+    return dokumen_terformat
+
+
 async def ambil_konteks(state: ChatState) -> dict[str, Any]:
     """
     Ambil konteks dari ChromaDB (RAG) dan PostgreSQL untuk menjawab.
@@ -424,6 +504,21 @@ async def ambil_konteks(state: ChatState) -> dict[str, Any]:
 
     except Exception as e:
         logger.error(f"   ❌ Gagal retrieval ChromaDB: {type(e).__name__}: {e}")
+
+    # ─── Langkah 1.5: Live web search (kalau pertanyaan butuh info ter-update) ───
+    #
+    # Ini yang bikin chatbot bisa "cari referensi ke website lain saat ada
+    # chat masuk" — bukan cuma andalkan data hasil scraping terjadwal
+    # (mingguan) yang sudah tersimpan di ChromaDB. Mirip cara Claude
+    # web-search saat menjawab pertanyaan yang butuh info terkini.
+    if _butuh_live_search(pertanyaan, len(dokumen_relevan)):
+        logger.info("   🌐 Pertanyaan butuh info ter-update, jalankan live web search...")
+        try:
+            dokumen_live = await _live_web_search_untuk_pertanyaan(pertanyaan, saham_list)
+            dokumen_relevan.extend(dokumen_live)
+            logger.info(f"   🌐 {len(dokumen_live)} dokumen tambahan dari live web search")
+        except Exception as e:
+            logger.error(f"   ❌ Live web search gagal: {type(e).__name__}: {e}")
 
     # ─── Langkah 2: Data dari PostgreSQL ───
     try:
