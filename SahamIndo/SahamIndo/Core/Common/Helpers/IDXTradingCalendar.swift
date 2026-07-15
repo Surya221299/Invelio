@@ -240,4 +240,45 @@ extension IDXTradingCalendar {
     static func lastActiveTradingDay(relativeTo now: Date = Date()) -> Date {
         isTradingDay(now) ? now : previousTradingDay(before: now)
     }
+
+    // MARK: - Jam Sesi & Istirahat (WIB)
+    //
+    // Jam perdagangan reguler BEI:
+    //   Senin–Kamis : Sesi I 09:00–12:00, ISTIRAHAT 12:00–13:30, Sesi II 13:30–15:50
+    //   Jumat       : Sesi I 09:00–11:30, ISTIRAHAT 11:30–14:00, Sesi II 14:00–15:50
+    // Chart 1D memakai penutupan reguler ~15:50 (konsisten dengan slot penutupan
+    // yang dipakai generator data 1D).
+
+    private static let regularCloseMinutes = 15 * 60 + 50   // 15:50 WIB
+
+    private static func minutesOfDay(_ date: Date) -> Int {
+        let cal = jakartaCalendar
+        return cal.component(.hour, from: date) * 60 + cal.component(.minute, from: date)
+    }
+
+    private static func isFriday(_ date: Date) -> Bool {
+        jakartaCalendar.component(.weekday, from: date) == 6   // 1=Minggu … 6=Jumat, 7=Sabtu
+    }
+
+    /// Menit (sejak tengah malam WIB) saat Sesi I ditutup / istirahat dimulai.
+    /// Senin–Kamis 12:00 (720), Jumat 11:30 (690).
+    static func session1CloseMinutes(_ date: Date = Date()) -> Int {
+        isFriday(date) ? 11 * 60 + 30 : 12 * 60
+    }
+
+    /// `true` jika `date` berada di jam istirahat siang bursa (antara Sesi I & II).
+    static func isMiddaySessionBreak(_ date: Date = Date()) -> Bool {
+        guard isTradingDay(date) else { return false }
+        let m = minutesOfDay(date)
+        return isFriday(date) ? (m >= 11 * 60 + 30 && m < 14 * 60)
+                              : (m >= 12 * 60      && m < 13 * 60 + 30)
+    }
+
+    /// `true` jika sesi perdagangan sedang berjalan: hari bursa, sudah buka (≥09:00),
+    /// belum tutup (<15:50), dan bukan jam istirahat.
+    static func isSessionOpen(_ date: Date = Date()) -> Bool {
+        guard isTradingDay(date) else { return false }
+        let m = minutesOfDay(date)
+        return m >= 9 * 60 && m < regularCloseMinutes && !isMiddaySessionBreak(date)
+    }
 }

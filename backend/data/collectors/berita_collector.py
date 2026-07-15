@@ -43,6 +43,7 @@ import httpx
 from loguru import logger
 
 from backend.config import settings
+from backend.utils.http import fetch_html
 
 # Timezone WIB (UTC+7) untuk parsing tanggal berita Indonesia
 _WIB = timezone(timedelta(hours=7))
@@ -54,11 +55,114 @@ _HTTP_TIMEOUT = 30.0
 _REQUEST_DELAY_SECONDS: float = 2.0
 
 
-# User agent agar tidak diblokir oleh server
-_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
+# ============================================================
+# News Profile — dukungan multi-market (Indonesia & US)
+# ============================================================
+#
+# Collector ini awalnya khusus saham Indonesia (Google News locale id/ID,
+# keyword & prompt LLM berbahasa Indonesia). Untuk mendukung saham US
+# (NASDAQ/NYSE/ETF) kita perkenalkan konsep "news locale":
+#
+#   market  -> locale berita
+#   IDX     -> "ID"  (berita berbahasa Indonesia, Google News id/ID)
+#   NASDAQ  -> "US"  (berita berbahasa Inggris, Google News en-US/US)
+#   NYSE    -> "US"
+#   ETF     -> "US"
+#
+# Semua fungsi collector menerima parameter `market` (default "IDX" agar
+# perilaku lama saham IDX TIDAK berubah). Locale menentukan: parameter
+# Google News RSS, template query pencarian, keyword filter relevansi, dan
+# bahasa prompt LLM-as-a-judge.
+
+
+def _news_locale(market: str | None) -> str:
+    """
+    Petakan market saham ke locale berita.
+
+    IDX (atau kosong/None) -> "ID" (perilaku lama, berita Indonesia).
+    Market US (NASDAQ/NYSE/ETF/dll) -> "US" (berita Inggris).
+    """
+    m = (market or "IDX").strip().upper()
+    return "ID" if m in ("", "IDX") else "US"
+
+
+# Parameter locale Google News RSS per locale berita.
+_GOOGLE_NEWS_LOCALE: dict[str, str] = {
+    "ID": "hl=id&gl=ID&ceid=ID:id",
+    "US": "hl=en-US&gl=US&ceid=US:en",
+}
+
+# Template query pencarian per emiten (di-format dengan `kode`).
+_EMITEN_QUERIES: dict[str, list[str]] = {
+    "ID": [
+        "saham {kode} IDX",
+        "{kode} emiten bursa",
+    ],
+    "US": [
+        "{kode} stock news",
+        "{kode} stock earnings",
+    ],
+}
+
+# Query pencarian berita pasar umum (tidak spesifik satu emiten).
+_PASAR_QUERIES: dict[str, list[str]] = {
+    "ID": [
+        "IHSG bursa efek indonesia",
+        "pasar modal indonesia saham",
+    ],
+    "US": [
+        "US stock market S&P 500 today",
+        "Wall Street stocks Nasdaq Dow Jones",
+    ],
+}
+
+# Keyword penanda NOISE (berita non-investasi) per locale.
+_NOISE_KEYWORDS: dict[str, list[str]] = {
+    "ID": [
+        "promo", "diskon", "voucher", "katalog belanja", "undian",
+        "mudik", "lebaran", "ramadan", "ramadhan", "giveaway",
+        "csr", "donasi", "bantuan sosial", "bansos", "beasiswa",
+        "lowongan kerja", "loker", "magang", "rekrutmen", "karir",
+        "olahraga", "sepak bola", "klasemen", "skor liga", "resep",
+        "kuliner", "makanan", "wisata", "liburan", "traveling",
+        "konser", "festival", "film", "sinopsis", "drama", "artis",
+        "gosip", "bencana alam", "gempa", "kecelakaan maut", "kebakaran",
+        "tawuran", "kriminal", "pembunuhan", "perampokan", "mudik gratis",
+        "tips diet", "kecantikan", "makeup", "fashion", "zodiak",
+    ],
+    "US": [
+        "coupon", "discount", "sale", "giveaway", "sweepstakes", "promo",
+        "deal of the day", "black friday deal", "gift guide",
+        "recipe", "food", "restaurant review", "travel guide", "vacation",
+        "concert", "festival", "movie review", "tv show", "celebrity",
+        "gossip", "horoscope", "sports", "nfl", "nba", "soccer",
+        "fashion", "makeup", "beauty tips", "weight loss", "obituary",
+        "how to watch", "streaming guide",
+    ],
+}
+
+# Keyword penanda berita FINANSIAL/INVESTASI (positif) per locale.
+_FINANCE_KEYWORDS: dict[str, list[str]] = {
+    "ID": [
+        "saham", "emiten", "laba", "rugi", "rupiah", "dolar", "investasi",
+        "ihsg", "bursa", "idx", "bei", "ipo", "rups", "dividen", "obligasi",
+        "reksadana", "sukuk", "gdp", "bi rate", "inflasi", "suku bunga",
+        "fomc", "fed", "keuangan", "akuisisi", "merger", "kinerja",
+        "kuartal", "q1", "q2", "q3", "q4", "fy", "semester", "revenue",
+        "pendapatan", "omzet", "ekspansi", "utang", "obligasi", "korporasi",
+        "harga saham", "rebound", "bullish", "bearish", "sideways", "kapitalisasi",
+    ],
+    "US": [
+        "stock", "shares", "earnings", "revenue", "profit", "loss", "dividend",
+        "nasdaq", "nyse", "s&p 500", "dow jones", "wall street", "ipo",
+        "guidance", "outlook", "analyst", "upgrade", "downgrade", "price target",
+        "acquisition", "merger", "buyback", "quarter", "q1", "q2", "q3", "q4",
+        "fiscal", "eps", "market cap", "fed", "fomc", "interest rate", "inflation",
+        "bullish", "bearish", "rally", "selloff", "valuation", "guidance",
+        "sec filing", "10-k", "10-q", "8-k", "forecast", "investor",
+    ],
+}
+
 
 def decode_google_news_url(url: str) -> str:
     """
@@ -104,49 +208,59 @@ async def fetch_article_content(url: str) -> str:
         url = decode_google_news_url(url)
 
     try:
-        async with httpx.AsyncClient(
-            timeout=15.0,
-            follow_redirects=True,
-            headers={"User-Agent": _USER_AGENT},
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        html = await fetch_html(url, timeout=15.0)
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = BeautifulSoup(html, "html.parser")
         
         # Bersihkan elemen yang tidak penting
         for element in soup(["script", "style", "nav", "header", "footer", "form", "aside", "iframe", "noscript"]):
             element.decompose()
             
-        # Cari div konten berita berdasarkan class/tag umum portal berita Indonesia
+        # Cari div konten berita berdasarkan class/tag umum portal berita.
+        # Mencakup portal Indonesia (Kompas/Detik/Kontan/dll) dan portal US
+        # (Yahoo Finance, CNBC, Reuters, MarketWatch, Bloomberg, dll).
         content_div = None
         for selector in [
-            "article", 
-            ".read__content", 
-            ".detail__body-text", 
-            ".post-content", 
-            ".entry-content", 
+            "article",
+            # Portal berita Indonesia
+            ".read__content",
+            ".detail__body-text",
+            ".post-content",
+            ".entry-content",
             ".post-body",
             ".article-content",
             ".detail-text",
-            ".news-content"
+            ".news-content",
+            # Portal berita US
+            ".caas-body",            # Yahoo Finance
+            ".ArticleBody-articleBody",  # CNBC
+            ".article-body__content",    # Reuters
+            ".paywall",              # WSJ/MarketWatch body wrapper
+            "[data-component='ArticleBody']",
+            ".article__content",
+            ".body-content",
         ]:
             content_div = soup.select_one(selector)
             if content_div:
                 break
-                
+
         if content_div:
             paragraphs = content_div.find_all("p")
         else:
             paragraphs = soup.find_all("p")
-            
+
         text_parts = []
         for p in paragraphs:
             text = p.get_text().strip()
-            # Filter baris/paragraf boilerplate umum
+            # Filter baris/paragraf boilerplate umum (ID + EN)
             if len(text) > 30 and not any(skip in text.lower() for skip in [
+                # Indonesia
                 "baca juga:", "download aplikasi", "simak breaking news", "follow instagram", "klik di sini",
-                "halaman selanjutnya", "selengkapnya di"
+                "halaman selanjutnya", "selengkapnya di",
+                # US
+                "read more:", "sign up for", "subscribe to", "follow us on", "click here",
+                "advertisement", "related:", "story continues", "terms of service",
+                "all rights reserved", "©",
             ]):
                 text_parts.append(text)
                 
@@ -155,14 +269,60 @@ async def fetch_article_content(url: str) -> str:
     except Exception as e:
         logger.warning(f"⚠️ Gagal mengambil isi berita dari {url}: {e}")
         return ""
-async def is_news_relevant_llm(title: str, content: str) -> bool:
+_JUDGE_PROMPTS: dict[str, dict[str, str]] = {
+    "ID": {
+        "system": "Kamu adalah juri investasi profesional. Jawab hanya dengan format JSON valid.",
+        "prompt": """Kamu adalah analis investasi profesional yang bertindak sebagai juri (LLM as a Judge).
+Tugasmu adalah menilai apakah berita keuangan berikut ini RELEVAN untuk analisis keputusan investasi saham emiten terkait, atau hanya berita promosi/CSR/iklan/noise yang tidak bernilai investasi.
+
+Judul Berita: "{title}"
+Isi Berita (Potongan):
+"{content}"
+
+Kriteria Relevan (True):
+- Berita tentang kinerja keuangan, laba, pendapatan, dividen, aksi korporasi (akuisisi, merger, right issue), target harga, rekomendasi saham, restrukturisasi, sengketa bisnis penting, ekspansi bisnis, atau perubahan manajemen emiten.
+
+Kriteria Tidak Relevan (False):
+- Berita tentang promosi produk biasa, diskon belanja, lowongan kerja (loker), program CSR/beasiswa, kegiatan olahraga/donasi rutin, ucapan selamat hari raya, info traveling, gosip, kecelakaan minor, atau siaran pers promosi komersial biasa yang tidak mempengaruhi nilai saham secara fundamental.
+
+Berikan penilaianmu dalam format JSON:
+{{"relevan": boolean, "alasan": "penjelasan singkat 1 kalimat"}}
+""",
+    },
+    "US": {
+        "system": "You are a professional investment judge. Respond ONLY with valid JSON.",
+        "prompt": """You are a professional investment analyst acting as a judge (LLM as a Judge).
+Your task is to decide whether the following financial news is RELEVANT for making a stock investment decision about the related company, or is just promotional/PR/ad/noise with no investment value.
+
+News Title: "{title}"
+News Body (excerpt):
+"{content}"
+
+Relevant criteria (True):
+- News about financial performance, earnings, revenue, dividends, corporate actions (acquisition, merger, buyback, split), analyst ratings/price targets, guidance/outlook, SEC filings, restructuring, major litigation, business expansion, or management changes.
+
+Not relevant criteria (False):
+- News about ordinary product promos, discounts/sales, job postings, CSR/scholarship programs, routine sports/donation activities, holiday greetings, travel guides, gossip, minor accidents, or ordinary commercial press releases that do not fundamentally affect the stock's value.
+
+Give your verdict in JSON format:
+{{"relevan": boolean, "alasan": "brief 1-sentence reason"}}
+""",
+    },
+}
+
+
+async def is_news_relevant_llm(title: str, content: str, market: str = "IDX") -> bool:
     """
     LLM as a Judge untuk memfilter relevansi berita (Kasus 6).
     Menilai apakah berita ini benar-benar relevan untuk analisis keputusan investasi saham
     atau hanya noise (CSR, diskon belanja, ucapan hari raya, dll).
+
+    Bahasa prompt mengikuti locale berita (Indonesia untuk IDX, Inggris untuk US).
     """
+    locale = _news_locale(market)
+
     # Lakukan filtering keyword cepat dulu agar tidak boros token ke LLM
-    if not is_news_relevant(title, content):
+    if not is_news_relevant(title, content, market=market):
         return False
 
     try:
@@ -178,24 +338,10 @@ async def is_news_relevant_llm(title: str, content: str) -> bool:
             timeout=20,
         )
 
-        prompt = f"""Kamu adalah analis investasi profesional yang bertindak sebagai juri (LLM as a Judge).
-Tugasmu adalah menilai apakah berita keuangan berikut ini RELEVAN untuk analisis keputusan investasi saham emiten terkait, atau hanya berita promosi/CSR/iklan/noise yang tidak bernilai investasi.
-
-Judul Berita: "{title}"
-Isi Berita (Potongan):
-"{content[:1000]}"
-
-Kriteria Relevan (True):
-- Berita tentang kinerja keuangan, laba, pendapatan, dividen, aksi korporasi (akuisisi, merger, right issue), target harga, rekomendasi saham, restrukturisasi, sengketa bisnis penting, ekspansi bisnis, atau perubahan manajemen emiten.
-
-Kriteria Tidak Relevan (False):
-- Berita tentang promosi produk biasa, diskon belanja, lowongan kerja (loker), program CSR/beasiswa, kegiatan olahraga/donasi rutin, ucapan selamat hari raya, info traveling, gosip, kecelakaan minor, atau siaran pers promosi komersial biasa yang tidak mempengaruhi nilai saham secara fundamental.
-
-Berikan penilaianmu dalam format JSON:
-{{"relevan": boolean, "alasan": "penjelasan singkat 1 kalimat"}}
-"""
+        tmpl = _JUDGE_PROMPTS[locale]
+        prompt = tmpl["prompt"].format(title=title, content=content[:1000])
         messages = [
-            SystemMessage(content="Kamu adalah juri investasi profesional. Jawab hanya dengan format JSON valid."),
+            SystemMessage(content=tmpl["system"]),
             HumanMessage(content=prompt)
         ]
 
@@ -216,46 +362,28 @@ Berikan penilaianmu dalam format JSON:
         return True  # Fallback ke True jika keyword filter sudah lolos
 
 
-def is_news_relevant(title: str, content: str = "") -> bool:
+def is_news_relevant(title: str, content: str = "", market: str = "IDX") -> bool:
     """
     Reranking/filtering berita untuk menyaring berita tidak relevan (promo, diskon, dll).
     Mengembalikan True jika berita dinilai relevan dengan investasi/emiten/pasar modal.
+
+    Keyword set mengikuti locale berita: bahasa Indonesia untuk IDX,
+    bahasa Inggris untuk market US (NASDAQ/NYSE/ETF).
     """
+    locale = _news_locale(market)
     title_lower = title.lower()
     content_lower = content.lower()
-    
+
     # Kata kunci penanda berita spam, gaya hidup, atau non-investasi (negatif/noise filter)
-    noise_keywords = [
-        "promo", "diskon", "voucher", "katalog belanja", "undian", 
-        "mudik", "lebaran", "ramadan", "ramadhan", "giveaway", 
-        "csr", "donasi", "bantuan sosial", "bansos", "beasiswa",
-        "lowongan kerja", "loker", "magang", "rekrutmen", "karir",
-        "olahraga", "sepak bola", "klasemen", "skor liga", "resep", 
-        "kuliner", "makanan", "wisata", "liburan", "traveling", 
-        "konser", "festival", "film", "sinopsis", "drama", "artis", 
-        "gosip", "bencana alam", "gempa", "kecelakaan maut", "kebakaran",
-        "tawuran", "kriminal", "pembunuhan", "perampokan", "mudik gratis",
-        "tips diet", "kecantikan", "makeup", "fashion", "zodiak"
-    ]
-    
-    for kw in noise_keywords:
+    for kw in _NOISE_KEYWORDS[locale]:
         if kw in title_lower:
             return False
-            
+
     # Kata kunci penanda berita finansial/investasi (positif filter)
-    finance_keywords = [
-        "saham", "emiten", "laba", "rugi", "rupiah", "dolar", "investasi", 
-        "ihsg", "bursa", "idx", "bei", "ipo", "rups", "dividen", "obligasi", 
-        "reksadana", "sukuk", "gdp", "bi rate", "inflasi", "suku bunga", 
-        "fomc", "fed", "keuangan", "akuisisi", "merger", "kinerja", 
-        "kuartal", "q1", "q2", "q3", "q4", "fy", "semester", "revenue",
-        "pendapatan", "omzet", "ekspansi", "utang", "obligasi", "korporasi",
-        "harga saham", "rebound", "bullish", "bearish", "sideways", "kapitalisasi"
-    ]
-    
+    finance_keywords = _FINANCE_KEYWORDS[locale]
     has_finance = any(kw in title_lower for kw in finance_keywords) or \
                   (content_lower and any(kw in content_lower for kw in finance_keywords))
-                  
+
     return has_finance
 
 
@@ -349,17 +477,11 @@ async def _fetch_rss_feed(url: str) -> list[dict[str, Any]]:
         List of entries dari RSS feed (bisa kosong jika gagal)
     """
     try:
-        async with httpx.AsyncClient(
-            timeout=_HTTP_TIMEOUT,
-            follow_redirects=True,
-            headers={"User-Agent": _USER_AGENT},
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        text = await fetch_html(url, timeout=_HTTP_TIMEOUT)
 
         # Bersihkan karakter ampersand yang tidak valid (&) agar XML feedparser tidak error
         import re
-        cleaned_text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;)', '&amp;', response.text)
+        cleaned_text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;)', '&amp;', text)
 
         # feedparser bisa parse string XML langsung
         feed = await asyncio.to_thread(feedparser.parse, cleaned_text)
@@ -390,6 +512,7 @@ async def _collect_from_google_news(
     kode_saham: str | None,
     query: str,
     hari_terakhir: int,
+    market: str = "IDX",
 ) -> list[dict[str, Any]]:
     """
     Ambil berita dari Google News RSS berdasarkan query pencarian.
@@ -398,16 +521,21 @@ async def _collect_from_google_news(
         kode_saham: Kode saham terkait (atau None untuk berita umum)
         query: Query pencarian Google News
         hari_terakhir: Hanya ambil berita dalam N hari terakhir
+        market: Market saham; menentukan locale Google News (IDX -> id/ID,
+                US -> en-US/US)
 
     Returns:
         List of dict berita yang sudah dinormalisasi
     """
+    locale = _news_locale(market)
+    locale_params = _GOOGLE_NEWS_LOCALE[locale]
+
     # Encode query untuk URL
     encoded_query = quote_plus(query)
     url = (
         f"https://news.google.com/rss/search"
         f"?q={encoded_query}+when:{hari_terakhir}d"
-        f"&hl=id&gl=ID&ceid=ID:id"
+        f"&{locale_params}"
     )
 
     logger.debug(f"🔍 Google News query: '{query}' ({hari_terakhir} hari)")
@@ -498,6 +626,7 @@ def _deduplikasi_berita(berita_list: list[dict[str, Any]]) -> list[dict[str, Any
 async def collect_berita(
     kode_saham: str,
     hari_terakhir: int = 7,
+    market: str = "IDX",
 ) -> list[dict[str, Any]]:
     """
     Ambil berita terkait satu saham dari semua sumber RSS.
@@ -506,8 +635,10 @@ async def collect_berita(
     lalu menggabungkan dan mendeduplikasi hasilnya.
 
     Args:
-        kode_saham: Kode saham IDX (contoh: "BBCA")
+        kode_saham: Kode saham (contoh: "BBCA" untuk IDX, "AAPL" untuk US)
         hari_terakhir: Hanya ambil berita dalam N hari terakhir (default: 7)
+        market: Market saham ("IDX", "NASDAQ", "NYSE", "ETF"). Menentukan
+                locale berita, query, dan filter relevansi (default: "IDX")
 
     Returns:
         List of dict berita yang sudah dinormalisasi dan dideduplikasi
@@ -526,20 +657,18 @@ async def collect_berita(
         }
     """
     kode = kode_saham.strip().upper()
-    logger.info(f"📰 Mengumpulkan berita untuk {kode} ({hari_terakhir} hari)...")
+    locale = _news_locale(market)
+    logger.info(f"📰 Mengumpulkan berita untuk {kode} (market={market}, {hari_terakhir} hari)...")
 
     all_berita: list[dict[str, Any]] = []
 
     # Sumber 1: Google News — query spesifik per emiten
     # Menggunakan beberapa variasi query untuk coverage yang lebih baik
-    queries = [
-        f"saham {kode} IDX",
-        f"{kode} emiten bursa",
-    ]
+    queries = [tmpl.format(kode=kode) for tmpl in _EMITEN_QUERIES[locale]]
 
     for query in queries:
         try:
-            berita = await _collect_from_google_news(kode, query, hari_terakhir)
+            berita = await _collect_from_google_news(kode, query, hari_terakhir, market=market)
             all_berita.extend(berita)
         except Exception as e:
             logger.error(
@@ -559,20 +688,20 @@ async def collect_berita(
     relevant_berita: list[dict[str, Any]] = []
     for berita in unique_berita:
         title = berita["judul"]
-        if is_news_relevant(title):
+        if is_news_relevant(title, market=market):
             url = berita["url"]
             # Decode URL di sini sebelum di-scrape agar lebih efisien dan hemat network call
             if "news.google.com" in url:
                 url = decode_google_news_url(url)
                 berita["url"] = url
-                
+
             logger.info(f"📰 Mengambil isi berita: {title[:50]}...")
             content = await fetch_article_content(url)
-            
+
             # Pastikan isi berita berhasil di-scrape dan cukup panjang (Kasus 2)
             if content and len(content.strip()) >= 200:
                 # Verifikasi relevansi secara mendalam menggunakan LLM as a Judge (Kasus 6)
-                if await is_news_relevant_llm(title, content):
+                if await is_news_relevant_llm(title, content, market=market):
                     berita["isi_berita"] = content
                     relevant_berita.append(berita)
                     # Batasi ke maksimal 5 berita berkualitas per emiten
@@ -600,6 +729,7 @@ async def collect_berita_batch(
     kode_saham_list: list[str],
     hari_terakhir: int = 7,
     progress_callback = None,
+    market_map: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Ambil berita untuk banyak saham sekaligus.
@@ -608,10 +738,13 @@ async def collect_berita_batch(
     untuk menghindari rate limiting.
 
     Args:
-        kode_saham_list: List kode saham (contoh: ["BBCA", "TLKM", "ASII"])
+        kode_saham_list: List kode saham (contoh: ["BBCA", "TLKM", "AAPL"])
         hari_terakhir: Hanya ambil berita dalam N hari terakhir
         progress_callback: Callback function to update status/progress
+        market_map: Peta {kode -> market} untuk watchlist campuran IDX & US.
+                    Kode yang tidak ada di map default ke "IDX".
     """
+    market_map = market_map or {}
     logger.info(
         f"📰 Batch berita: {len(kode_saham_list)} saham, "
         f"{hari_terakhir} hari terakhir"
@@ -622,9 +755,11 @@ async def collect_berita_batch(
     for i, kode in enumerate(kode_saham_list):
         if progress_callback:
             await progress_callback(i + 1, len(kode_saham_list), kode)
-            
+
         try:
-            berita = await collect_berita(kode, hari_terakhir)
+            berita = await collect_berita(
+                kode, hari_terakhir, market=market_map.get(kode.strip().upper(), "IDX")
+            )
             all_berita.extend(berita)
         except Exception as e:
             logger.error(
@@ -650,44 +785,43 @@ async def collect_berita_batch(
 
 async def collect_berita_pasar(
     hari_terakhir: int = 3,
+    market: str = "IDX",
 ) -> list[dict[str, Any]]:
     """
     Ambil berita pasar modal umum (tidak spesifik ke satu saham).
 
-    Mengambil dari Google News (query umum) dan Kontan RSS.
-    Berita ini berguna untuk analisis sentimen pasar secara keseluruhan.
+    Mengambil dari Google News (query umum). Untuk market IDX juga menambah
+    Kontan RSS. Berita ini berguna untuk analisis sentimen pasar keseluruhan.
 
     Args:
         hari_terakhir: Hanya ambil berita dalam N hari terakhir (default: 3)
+        market: Market pasar ("IDX" -> pasar Indonesia, US -> Wall Street)
 
     Returns:
         List of dict berita pasar umum (kode_saham = None)
     """
-    logger.info(f"🌐 Mengumpulkan berita pasar umum ({hari_terakhir} hari)...")
+    locale = _news_locale(market)
+    logger.info(f"🌐 Mengumpulkan berita pasar umum (market={market}, {hari_terakhir} hari)...")
 
     all_berita: list[dict[str, Any]] = []
 
-    # Sumber 1: Google News — berita pasar umum
-    queries_pasar = [
-        "IHSG bursa efek indonesia",
-        "pasar modal indonesia saham",
-    ]
-
-    for query in queries_pasar:
+    # Sumber 1: Google News — berita pasar umum (sesuai locale)
+    for query in _PASAR_QUERIES[locale]:
         try:
-            berita = await _collect_from_google_news(None, query, hari_terakhir)
+            berita = await _collect_from_google_news(None, query, hari_terakhir, market=market)
             all_berita.extend(berita)
         except Exception as e:
             logger.error(f"❌ Gagal Google News pasar '{query}': {e}")
 
         await asyncio.sleep(_REQUEST_DELAY_SECONDS)
 
-    # Sumber 2: Kontan RSS — berita ekonomi
-    try:
-        berita_kontan = await _collect_from_kontan(hari_terakhir)
-        all_berita.extend(berita_kontan)
-    except Exception as e:
-        logger.error(f"❌ Gagal ambil Kontan RSS: {e}")
+    # Sumber 2: Kontan RSS — berita ekonomi (hanya relevan untuk pasar Indonesia)
+    if locale == "ID":
+        try:
+            berita_kontan = await _collect_from_kontan(hari_terakhir)
+            all_berita.extend(berita_kontan)
+        except Exception as e:
+            logger.error(f"❌ Gagal ambil Kontan RSS: {e}")
 
     # Deduplikasi
     unique_berita = _deduplikasi_berita(all_berita)
@@ -698,7 +832,7 @@ async def collect_berita_pasar(
     relevant_berita: list[dict[str, Any]] = []
     for berita in unique_berita:
         title = berita["judul"]
-        if is_news_relevant(title):
+        if is_news_relevant(title, market=market):
             url = berita["url"]
             # Decode URL di sini sebelum di-scrape agar lebih efisien dan hemat network call
             if "news.google.com" in url:
@@ -707,11 +841,11 @@ async def collect_berita_pasar(
 
             logger.info(f"🌐 Mengambil isi berita pasar: {title[:50]}...")
             content = await fetch_article_content(url)
-            
+
             # Pastikan isi berita berhasil di-scrape dan cukup panjang (Kasus 2)
             if content and len(content.strip()) >= 200:
                 # Verifikasi relevansi secara mendalam menggunakan LLM as a Judge (Kasus 6)
-                if await is_news_relevant_llm(title, content):
+                if await is_news_relevant_llm(title, content, market=market):
                     berita["isi_berita"] = content
                     relevant_berita.append(berita)
                     # Batasi ke maksimal 5 berita berkualitas
@@ -755,6 +889,7 @@ async def live_search_berita(
     kode_saham: str | None = None,
     hari_terakhir: int = 3,
     max_hasil: int = 4,
+    market: str = "IDX",
 ) -> list[dict[str, Any]]:
     """
     Cari & ambil isi berita TERBARU secara real-time buat konteks chatbot.
@@ -766,6 +901,7 @@ async def live_search_berita(
         hari_terakhir: Cuma ambil berita dalam N hari terakhir.
         max_hasil: Maksimal berapa artikel yang isinya di-fetch penuh
             (fetch isi lengkap itu paling lambat, jadi dibatasi ketat).
+        market: Market saham ("IDX" -> berita Indonesia, US -> berita Inggris).
 
     Returns:
         List of dict siap dipakai sebagai konteks LLM:
@@ -779,6 +915,7 @@ async def live_search_berita(
             kode_saham=kode_saham,
             query=query,
             hari_terakhir=hari_terakhir,
+            market=market,
         )
     except Exception as e:
         logger.warning(f"⚠️ Live search gagal ambil RSS Google News untuk '{query}': {e}")

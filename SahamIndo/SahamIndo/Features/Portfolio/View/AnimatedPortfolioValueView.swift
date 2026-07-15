@@ -109,7 +109,8 @@ struct PortfolioValueAnimator: View {
                 displayValue = portfolioVM.cachedStockValue
             }
             .onChange(of: portfolioVM.serverStockValue) { _, serverVal in
-                guard let serverVal, serverVal > 0 else { return }
+                // >= 0: izinkan animasi turun ke 0 saat semua saham terjual.
+                guard let serverVal, serverVal >= 0 else { return }
                 let prev = displayValue
                 // Delay 2 detik untuk efek "loading from cache then update"
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {

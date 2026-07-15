@@ -56,6 +56,7 @@ feedparser>=6.0.0,<7.0.0        # RSS reader (Google News, Kontan)
 pdfplumber>=0.11.0,<1.0.0       # Ekstrak teks dari PDF laporan keuangan
 yfinance>=0.2.40,<1.0.0         # Yahoo Finance API
 beautifulsoup4>=4.12.0,<5.0.0   # HTML parsing untuk scraping
+googlenewsdecoder>=0.1.7        # Decode URL redirect Google News -> URL artikel asli
 
 # ============================================================
 # Data Processing

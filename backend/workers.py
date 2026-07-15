@@ -412,30 +412,49 @@ async def scrape_news_job() -> None:
     try:
         # 1. Ambil daftar kode saham WATCHLIST dari PostgreSQL (bukan seluruh
         #    simbol_referensi — saham hasil "Analyze" ad-hoc tidak ikut di sini)
+        #    Ikut ambil kolom `market` supaya berita saham US diambil dari
+        #    Google News locale US (bukan Indonesia).
         async with async_session() as session:
-            result = await session.execute(select(Saham.kode).where(Saham.is_watchlist == True))
-            kode_saham_list = [row for row in result.scalars().all()]
+            result = await session.execute(
+                select(Saham.kode, Saham.market).where(Saham.is_watchlist == True)
+            )
+            rows = result.all()
+        kode_saham_list = [row.kode for row in rows]
+        market_map = {row.kode.strip().upper(): (row.market or "IDX") for row in rows}
 
         if not kode_saham_list:
             logger.warning("⚠️ Tidak ada kode saham terdaftar di DB. Skip scraping berita.")
             set_progress("scrape_news", 100, "idle", "Selesai (tidak ada emiten)")
             return
 
-        # 2. Collect berita untuk semua saham (batch)
+        # 2. Collect berita untuk semua saham (batch), locale mengikuti market tiap saham
         logger.info(f"📰 Scraping berita untuk {len(kode_saham_list)} saham...")
         set_progress("scrape_news", 15, "running", f"Scraping berita untuk {len(kode_saham_list)} emiten...")
-        
+
         async def news_progress_callback(current, total, kode):
             percent = int(15 + (current / total) * 15)  # Maps 15% to 30% progress
             set_progress("scrape_news", percent, "running", f"Scraping berita emiten {kode} ({current}/{total})...")
-            
-        raw_berita = await collect_berita_batch(kode_saham_list, hari_terakhir=3, progress_callback=news_progress_callback)
 
-        # 3. Collect berita pasar umum
-        logger.info("🌐 Scraping berita pasar umum...")
+        raw_berita = await collect_berita_batch(
+            kode_saham_list, hari_terakhir=3, progress_callback=news_progress_callback,
+            market_map=market_map,
+        )
+
+        # 3. Collect berita pasar umum — untuk tiap market yang ada di watchlist
+        #    (mis. IDX -> berita IHSG, US -> berita Wall Street). Petakan market
+        #    spesifik ke locale supaya tidak scraping pasar yang sama dua kali.
+        from backend.data.collectors.berita_collector import _news_locale
+        locale_markets: dict[str, str] = {}
+        for m in market_map.values():
+            locale_markets.setdefault(_news_locale(m), m)
+        if not locale_markets:
+            locale_markets["ID"] = "IDX"
+
         set_progress("scrape_news", 30, "running", "Scraping berita pasar umum...")
-        raw_berita_pasar = await collect_berita_pasar(hari_terakhir=2)
-        raw_berita.extend(raw_berita_pasar)
+        for m in locale_markets.values():
+            logger.info(f"🌐 Scraping berita pasar umum (market={m})...")
+            raw_berita_pasar = await collect_berita_pasar(hari_terakhir=2, market=m)
+            raw_berita.extend(raw_berita_pasar)
 
         # 4. Clean data, analisis sentimen, dan simpan ke PostgreSQL
         saved_count = 0

@@ -191,7 +191,18 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
         } else {
             if cal.isDate(openDate, inSameDayAs: now) {
                 let minutes = now.timeIntervalSince(openDate) / 60.0
-                currentSlotIdx = max(0, min(Int(minutes / 5.0), totalSlots - 1))
+                let rawIdx  = max(0, min(Int(minutes / 5.0), totalSlots - 1))
+                // Selama jam ISTIRAHAT bursa (12:00–13:30 Sen–Kam / 11:30–14:00 Jum)
+                // tidak ada perdagangan. Bekukan di slot penutupan Sesi I supaya
+                // chart tidak menggambar garis flat yang merambat ke kanan (dan
+                // dot "live" tidak ikut merayap) sepanjang istirahat.
+                if IDXTradingCalendar.isMiddaySessionBreak(now) {
+                    let capMins = IDXTradingCalendar.session1CloseMinutes(now) - openMins
+                    let cap     = max(0, min(capMins / 5, totalSlots - 1))
+                    currentSlotIdx = min(rawIdx, cap)
+                } else {
+                    currentSlotIdx = rawIdx
+                }
             } else {
                 currentSlotIdx = totalSlots - 1
             }

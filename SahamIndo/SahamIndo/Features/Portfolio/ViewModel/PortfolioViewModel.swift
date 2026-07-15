@@ -27,6 +27,10 @@ final class PortfolioViewModel: ObservableObject {
     /// Nilai saham terbaru dari server. Nil selama belum ada response.
     @Published private(set) var serverStockValue: Double? = nil
 
+    /// Hasil analisis kesehatan portofolio + narasi harian dari backend.
+    @Published private(set) var health: PortfolioHealth? = nil
+    @Published private(set) var isAnalyzingHealth: Bool = false
+
     private let cachedValueKey = "portfolio_cached_stock_value_v1"
 
     // MARK: - Computed
@@ -45,6 +49,7 @@ final class PortfolioViewModel: ObservableObject {
     private let sellUseCase:          SellStockUseCase
     private let portfolioRepository:  PortfolioRepositoryProtocol
     private let fetchChartUseCase:    FetchChartDataUseCase
+    private let healthRepository:     PortfolioHealthRepositoryProtocol
 
     // MARK: - Init
 
@@ -53,13 +58,15 @@ final class PortfolioViewModel: ObservableObject {
         buyUseCase:           BuyStockUseCase,
         sellUseCase:          SellStockUseCase,
         portfolioRepository:  PortfolioRepositoryProtocol,
-        fetchChartUseCase:    FetchChartDataUseCase
+        fetchChartUseCase:    FetchChartDataUseCase,
+        healthRepository:     PortfolioHealthRepositoryProtocol
     ) {
         self.fetchStocksUseCase   = fetchStocksUseCase
         self.buyUseCase           = buyUseCase
         self.sellUseCase          = sellUseCase
         self.portfolioRepository  = portfolioRepository
         self.fetchChartUseCase    = fetchChartUseCase
+        self.healthRepository     = healthRepository
         loadPersistedData()
         cachedStockValue = UserDefaults.standard.double(forKey: cachedValueKey)
     }
@@ -72,12 +79,37 @@ final class PortfolioViewModel: ObservableObject {
         let (newItems, _) = await fetchStocksUseCase.execute(holdings: holdings)
         items     = newItems
         isLoading = false
-        // Simpan nilai baru ke cache dan expose sebagai serverStockValue
-        let newValue = totalStockValue
-        if newValue > 0 {
+        // Simpan nilai baru ke cache dan expose sebagai serverStockValue.
+        // Update juga saat nilai = 0 ASAL memang tidak ada kepemilikan aktif
+        // (mis. semua saham sudah dijual / portfolio di-reset) — supaya saldo
+        // benar-benar turun ke 0, bukan "stuck" di nilai terakhir. Nilai 0 saat
+        // MASIH ada holding (mis. fetch gagal) tetap diabaikan agar cache aman.
+        let newValue         = totalStockValue
+        let hasActiveHolding = holdings.contains { $0.quantity > 0 }
+        if newValue > 0 || !hasActiveHolding {
             serverStockValue = newValue
             UserDefaults.standard.set(newValue, forKey: cachedValueKey)
             cachedStockValue = newValue
+        }
+    }
+
+    /// Analisis kesehatan portofolio + narasi harian dari backend.
+    /// Dipanggil setelah data holdings siap (mis. di `.task` view) dan setelah
+    /// transaksi buy/sell. Tidak dipanggil pada tiap refresh harga streaming
+    /// karena memicu LLM lokal (mahal).
+    func analyzeHealth() async {
+        let active = holdings.filter { $0.quantity > 0 }
+        guard !active.isEmpty else {
+            health = nil
+            return
+        }
+        isAnalyzingHealth = true
+        defer { isAnalyzingHealth = false }
+        do {
+            health = try await healthRepository.analyze(holdings: active)
+        } catch {
+            // Diamkan — kartu kesehatan cukup disembunyikan bila gagal.
+            print("[PortfolioVM] analyzeHealth gagal: \(error.localizedDescription)")
         }
     }
 
@@ -93,7 +125,7 @@ final class PortfolioViewModel: ObservableObject {
             tradeHistory.insert(r.tradeRecord, at: 0)
             lots.append(r.newLot)
             persist()
-            Task { await fetchData() }
+            Task { await fetchData(); await analyzeHealth() }
         case .failure(let err):
             errorMessage = err.errorDescription
         }
@@ -110,7 +142,7 @@ final class PortfolioViewModel: ObservableObject {
             tradeHistory.insert(r.tradeRecord, at: 0)
             lots        = r.updatedLots
             persist()
-            Task { await fetchData() }
+            Task { await fetchData(); await analyzeHealth() }
         case .failure(let err):
             errorMessage = err.errorDescription
         }
@@ -170,6 +202,7 @@ final class PortfolioViewModel: ObservableObject {
         holdings     = holdings.map { Holding(id: $0.id, symbol: $0.symbol, quantity: 0, totalCostBasis: 0) }
         tradeHistory = []
         lots         = []
+        health       = nil
         persist()
         Task { await fetchData() }
     }

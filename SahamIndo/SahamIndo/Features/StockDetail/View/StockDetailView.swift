@@ -98,13 +98,16 @@ struct StockDetailView: View {
 
                     // Badge pre-market/after-hours — cuma muncul untuk NASDAQ/NYSE/ETF
                     // dan cuma kalau memang sedang dalam sesi itu saat ini.
-                    if !isDragging {
-                        HStack {
-                            ExtendedHoursBadgeView(data: extendedHours, style: .full)
-                            Spacer()
-                        }
-                        .padding(.horizontal)
+                    // Saat drag, badge cuma di-FADE (opacity 0), BUKAN dihapus dari
+                    // tree — kalau dihapus, tinggi + spacing VStack hilang sehingga
+                    // chart & view di bawahnya ikut melompat ke atas.
+                    HStack {
+                        ExtendedHoursBadgeView(data: extendedHours, style: .full)
+                        Spacer()
                     }
+                    .padding(.horizontal)
+                    .opacity(isDragging ? 0 : 1)
+                    .animation(.easeInOut(duration: 0.1), value: isDragging)
 
                     ChartCanvasView(
                         chartVM:           viewModel,
@@ -407,10 +410,19 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
     /// Default "IDX" supaya PortfolioHistoryChart (nilai portofolio, selalu
     /// Rupiah) tidak perlu diubah.
     var market: String = "IDX"
+    /// Attach the scrub gesture as `.highPriorityGesture` instead of `.gesture`.
+    /// Needed when the chart lives inside a clipped card nested in a vertical
+    /// ScrollView (Portfolio card di HomeView) — di situ ScrollView memenangkan
+    /// pan gesture sehingga crosshair tidak pernah aktif. StockDetail (chart
+    /// langsung anak ScrollView) tetap pakai `.gesture` default.
+    var useHighPriorityDrag: Bool = false
 
     @State private var animatedData:        AnimatableChartData = .zero
     @State private var oneDayReady:         Bool    = false
     @State private var oneDayClipWidth:     CGFloat = 0
+    /// `true` setelah animasi reveal 1D (clip kiri→kanan) selesai. Selama masih
+    /// `false`, dot aktif merambat mengikuti ujung garis (bukan diam di kanan).
+    @State private var oneDayRevealDone:    Bool    = false
     @State private var hasEverLoadedOneDay: Bool    = false
     @State private var pulseScale:          CGFloat = 1.0
     /// Non-1D first-load reveal: clip slides left→right once, then stays full width.
@@ -454,29 +466,15 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
             // Simple window: 20:00–05:30 WIB (generous to cover both DST cases)
             return nowMins >= 20 * 60 || nowMins <= 5 * 60 + 30
         } else {
-            // IDX: 09:00–16:00 WIB (with midday break, but we animate the whole session)
-            return nowMins >= 9 * 60 && nowMins < 16 * 60
+            // IDX: hanya "aktif" saat sesi benar-benar berjalan — buka, belum
+            // tutup, DAN bukan jam istirahat siang. Selama istirahat pulse dot
+            // berhenti karena tidak ada perdagangan.
+            return IDXTradingCalendar.isSessionOpen(now)
         }
     }
 
     var body: some View {
-        ZStack {
-            let shouldShow = chartSize.height > 0 &&
-                (oneDayReady || !animatedData.points.isEmpty)
-
-            if shouldShow {
-                chartContent
-            } else if chartVM.dataPoints.isEmpty && !chartVM.isLoading {
-                Text("Data tidak tersedia")
-                    .font(.caption).foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.appCardBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .contentShape(Rectangle().inset(by: -40))
-        .gesture(dragGesture)
+        interactiveChart
         .onChange(of: chartVM.isLoading) { _, isLoading in
             guard !isLoading else { return }
             applyChartData()
@@ -498,6 +496,41 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
         }
         .onAppear { updatePulse() }
         .onChange(of: chartVM.selectedRange) { _, _ in updatePulse() }
+    }
+
+    /// Scrub gesture di-attach sebagai high-priority hanya bila diminta (Portfolio
+    /// card di dalam ScrollView). `useHighPriorityDrag` konstan per call-site,
+    /// jadi cabang ini stabil dan tidak memicu reset identity SwiftUI.
+    @ViewBuilder
+    private var interactiveChart: some View {
+        if useHighPriorityDrag {
+            coreChart.highPriorityGesture(dragGesture)
+        } else {
+            coreChart.gesture(dragGesture)
+        }
+    }
+
+    private var coreChart: some View {
+        ZStack {
+            let shouldShow = chartSize.height > 0 &&
+                (oneDayReady || !animatedData.points.isEmpty)
+
+            if shouldShow {
+                chartContent
+            } else if chartVM.dataPoints.isEmpty && !chartVM.isLoading {
+                Text("Data tidak tersedia")
+                    .font(.caption).foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.appCardBackground))
+        // Catatan: clip rounded TIDAK dipasang di sini lagi — kalau seluruh ZStack
+        // di-clip, dot harga terakhir / pulse ring di tepi kanan (x ≈ width-4)
+        // ikut ter-crop. Clip rounded sekarang hanya membungkus grafik area/line
+        // di dalam `chartContent`, sedangkan dot & crosshair digambar sebagai
+        // overlay tanpa clip. Lihat chartContent.
+        .contentShape(Rectangle().inset(by: -40))
     }
 
     // MARK: - Pulse Animation
@@ -538,8 +571,12 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                 hasEverLoadedOneDay = true
                 oneDayReady         = true
                 oneDayClipWidth     = 0
+                oneDayRevealDone    = false
                 DispatchQueue.main.async {
                     withAnimation(.easeInOut(duration: 1.2)) { oneDayClipWidth = targetClip }
+                    // Setelah reveal selesai, dot pindah ke mode "ikuti data terakhir"
+                    // (agar update streaming live tetap menggerakkan dot).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.25) { oneDayRevealDone = true }
                 }
             } else {
                 oneDayReady = false
@@ -608,90 +645,77 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
         }() : []
 
         ZStack {
-            DashLine(from: CGPoint(x: 0, y: yMax), to: CGPoint(x: chartSize.width, y: yMax))
-                .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            DashLine(from: CGPoint(x: 0, y: yMin), to: CGPoint(x: chartSize.width, y: yMin))
-                .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            AnimatableHDashLine(y: yBaseline)
-                .stroke(Color.AccentGold.opacity(0.50),
-                        style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
-                .animation(.spring(response: 1.55, dampingFraction: 1.0), value: yBaseline)
+            // ==== Grafik chart — DI-CLIP rounded (sudut kartu membulat) ====
+            // Hanya area/line/dash yang di-clip. Dot & crosshair digambar sebagai
+            // overlay di luar clip ini supaya tidak ter-crop di tepi kanan.
+            ZStack {
+                DashLine(from: CGPoint(x: 0, y: yMax), to: CGPoint(x: chartSize.width, y: yMax))
+                    .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                DashLine(from: CGPoint(x: 0, y: yMin), to: CGPoint(x: chartSize.width, y: yMin))
+                    .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                AnimatableHDashLine(y: yBaseline)
+                    .stroke(Color.AccentGold.opacity(0.50),
+                            style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
+                    .animation(.spring(response: 1.55, dampingFraction: 1.0), value: yBaseline)
 
-            if isOneDay {
-                let lastSlotIdx = data.isEmpty ? 0 : chartVM.oneDaySlotIndex(for: data.last!.date)
-                let innerW      = chartSize.width - 8
-                let dotX        = 4 + CGFloat(lastSlotIdx) / CGFloat(chartVM.oneDayTotalSlots - 1) * innerW
-                let dotColor    = lastP >= startP ? greenColor : redColor
-
-                ZStack {
-                    OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
-                                    hPad: 4, closingY: yBaseline)
-                        .fill(LinearGradient(stops: [
-                            .init(color: greenColor.opacity(0.38), location: 0.0),
-                            .init(color: greenColor.opacity(0.18), location: 0.5),
-                            .init(color: greenColor.opacity(0.0),  location: 1.0)],
-                            startPoint: .top, endPoint: .bottom))
-                        .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
-                    OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
-                                    hPad: 4, closingY: yBaseline)
-                        .fill(LinearGradient(stops: [
-                            .init(color: redColor.opacity(0.38), location: 0.0),
-                            .init(color: redColor.opacity(0.18), location: 0.5),
-                            .init(color: redColor.opacity(0.0),  location: 1.0)],
-                            startPoint: .bottom, endPoint: .top))
-                        .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
-                            width: chartSize.width, height: chartSize.height - yBaseline)))
-                    OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
-                        .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                        .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
-                    OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
-                        .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                        .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
-                            width: chartSize.width, height: chartSize.height - yBaseline)))
-                    if !isDragging {
-                        AnimatableHDashLine(y: yLast)
-                            .stroke(dotColor.opacity(0.70), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
-                        // Pulse ring — only when market is active
-                        if isMarketActive {
-                            Circle()
-                                .fill(dotColor.opacity(0.25))
-                                .frame(width: 9 * pulseScale, height: 9 * pulseScale)
-                                .position(x: dotX, y: yLast)
-                        }
-                        Circle().fill(dotColor).frame(width: 9, height: 9)
-                            .shadow(color: dotColor.opacity(0.7), radius: 5)
-                            .position(x: dotX, y: yLast)
-                        Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
-                            .position(x: dotX, y: yLast)
+                if isOneDay {
+                    ZStack {
+                        OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
+                                        hPad: 4, closingY: yBaseline)
+                            .fill(LinearGradient(stops: [
+                                .init(color: greenColor.opacity(0.38), location: 0.0),
+                                .init(color: greenColor.opacity(0.18), location: 0.5),
+                                .init(color: greenColor.opacity(0.0),  location: 1.0)],
+                                startPoint: .top, endPoint: .bottom))
+                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
+                        OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
+                                        hPad: 4, closingY: yBaseline)
+                            .fill(LinearGradient(stops: [
+                                .init(color: redColor.opacity(0.38), location: 0.0),
+                                .init(color: redColor.opacity(0.18), location: 0.5),
+                                .init(color: redColor.opacity(0.0),  location: 1.0)],
+                                startPoint: .bottom, endPoint: .top))
+                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
+                                width: chartSize.width, height: chartSize.height - yBaseline)))
+                        OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
+                            .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
+                        OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
+                            .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
+                                width: chartSize.width, height: chartSize.height - yBaseline)))
                     }
-                }
-                .clipShape(AnimatableClipRect(clipWidth: oneDayClipWidth))
+                    .clipShape(AnimatableClipRect(clipWidth: oneDayClipWidth))
 
-            } else {
-                ZStack {
-                    MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
-                        .fill(LinearGradient(stops: [
-                            .init(color: greenColor.opacity(0.38), location: 0.0),
-                            .init(color: greenColor.opacity(0.18), location: 0.5),
-                            .init(color: greenColor.opacity(0.0),  location: 1.0)],
-                            startPoint: .top, endPoint: .bottom))
-                        .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
-                    MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
-                        .fill(LinearGradient(stops: [
-                            .init(color: redColor.opacity(0.38), location: 0.0),
-                            .init(color: redColor.opacity(0.18), location: 0.5),
-                            .init(color: redColor.opacity(0.0),  location: 1.0)],
-                            startPoint: .bottom, endPoint: .top))
-                        .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
-                    MorphingXYLineShape(data: animatedData)
-                        .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                        .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
-                    MorphingXYLineShape(data: animatedData)
-                        .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                        .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
+                } else {
+                    ZStack {
+                        MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
+                            .fill(LinearGradient(stops: [
+                                .init(color: greenColor.opacity(0.38), location: 0.0),
+                                .init(color: greenColor.opacity(0.18), location: 0.5),
+                                .init(color: greenColor.opacity(0.0),  location: 1.0)],
+                                startPoint: .top, endPoint: .bottom))
+                            .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
+                        MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
+                            .fill(LinearGradient(stops: [
+                                .init(color: redColor.opacity(0.38), location: 0.0),
+                                .init(color: redColor.opacity(0.18), location: 0.5),
+                                .init(color: redColor.opacity(0.0),  location: 1.0)],
+                                startPoint: .bottom, endPoint: .top))
+                            .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
+                        MorphingXYLineShape(data: animatedData)
+                            .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                            .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
+                        MorphingXYLineShape(data: animatedData)
+                            .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                            .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
+                    }
+                    .clipShape(AnimatableClipRect(clipWidth: (!revealOnFirstLoad || hasRevealed) ? chartSize.width : revealClipWidth))
                 }
-                .clipShape(AnimatableClipRect(clipWidth: (!revealOnFirstLoad || hasRevealed) ? chartSize.width : revealClipWidth))
             }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            // ==== Overlay — TIDAK di-clip (dot & shadow bebas di tepi) ====
 
             // Max / Min labels
             Text("Max \(formatPrice(maxP, market: market))")
@@ -705,20 +729,83 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                 .background(Color.appCardBackground.opacity(0.85)).cornerRadius(4)
                 .position(x: chartSize.width - 34, y: yMin + 10)
 
+            // Active price dot & dashed line — 1D (pulse saat market aktif)
+            if isOneDay && !isDragging {
+                let innerW   = chartSize.width - 8
+                let dotColor = lastP >= startP ? greenColor : redColor
+
+                if !oneDayRevealDone && data.count > 1 {
+                    // Reveal pertama: garis 1D tumbuh kiri→kanan via oneDayClipWidth.
+                    // Dot ikut merambat di ujung garis (tipX = oneDayClipWidth),
+                    // bukan langsung menempel di posisi terakhir. Titik polyline
+                    // dihitung identik dengan OneDayLineShape (hPad 4) & yPos.
+                    let tipPoints: [CGPoint] = data.map { pt in
+                        let slot = chartVM.oneDaySlotIndex(for: pt.date)
+                        return CGPoint(
+                            x: 4 + CGFloat(slot) / CGFloat(chartVM.oneDayTotalSlots - 1) * innerW,
+                            y: yPos(for: pt.close, in: chartSize)
+                        )
+                    }
+                    ZStack {
+                        Circle().fill(dotColor).frame(width: 9, height: 9)
+                            .shadow(color: dotColor.opacity(0.7), radius: 5)
+                        Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
+                    }
+                    .frame(width: 9, height: 9)
+                    .position(x: 0, y: 0)
+                    .modifier(GrowingLineTip(tipX: oneDayClipWidth, points: tipPoints))
+                } else {
+                    // Settled: dot menempel di data terakhir (mengikuti update live).
+                    let lastSlotIdx = data.isEmpty ? 0 : chartVM.oneDaySlotIndex(for: data.last!.date)
+                    let dotX        = 4 + CGFloat(lastSlotIdx) / CGFloat(chartVM.oneDayTotalSlots - 1) * innerW
+
+                    AnimatableHDashLine(y: yLast)
+                        .stroke(dotColor.opacity(0.70), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                    if isMarketActive {
+                        Circle()
+                            .fill(dotColor.opacity(0.25))
+                            .frame(width: 9 * pulseScale, height: 9 * pulseScale)
+                            .position(x: dotX, y: yLast)
+                    }
+                    Circle().fill(dotColor).frame(width: 9, height: 9)
+                        .shadow(color: dotColor.opacity(0.7), radius: 5)
+                        .position(x: dotX, y: yLast)
+                    Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
+                        .position(x: dotX, y: yLast)
+                }
+            }
+
             // Last price dot & dashed line (non-1D)
             if !isDragging && !isOneDay {
-                let dotColor = lastP >= startP ? greenColor : redColor
-                let animX = animatedData.points.last.map { $0.x } ?? xFor(index: data.count - 1, count: data.count, width: chartSize.width)
-                let animY = animatedData.points.last.map { $0.y } ?? yLast
+                let dotColor  = lastP >= startP ? greenColor : redColor
+                let tipPoints = animatedData.points.map { CGPoint(x: $0.x, y: $0.y) }
 
-                AnimatableHDashLine(y: animY)
-                    .stroke(dotColor.opacity(0.70), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
-                    .animation(.spring(response: 1.55, dampingFraction: 1.0), value: animY)
-                Circle().fill(dotColor).frame(width: 9, height: 9)
-                    .shadow(color: dotColor.opacity(0.7), radius: 5)
-                    .position(x: animX, y: animY)
-                Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
-                    .position(x: animX, y: animY)
+                if revealOnFirstLoad && !hasRevealed && tipPoints.count > 1 {
+                    // First-load reveal: dot merambat mengikuti ujung garis yang
+                    // sedang tumbuh (tipX = revealClipWidth yang di-animate).
+                    // Garis referensi horizontal disembunyikan dulu — muncul saat
+                    // reveal selesai (cabang else di bawah).
+                    ZStack {
+                        Circle().fill(dotColor).frame(width: 9, height: 9)
+                            .shadow(color: dotColor.opacity(0.7), radius: 5)
+                        Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
+                    }
+                    .frame(width: 9, height: 9)
+                    .position(x: 0, y: 0)
+                    .modifier(GrowingLineTip(tipX: revealClipWidth, points: tipPoints))
+                } else {
+                    let animX = animatedData.points.last.map { $0.x } ?? xFor(index: data.count - 1, count: data.count, width: chartSize.width)
+                    let animY = animatedData.points.last.map { $0.y } ?? yLast
+
+                    AnimatableHDashLine(y: animY)
+                        .stroke(dotColor.opacity(0.70), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                        .animation(.spring(response: 1.55, dampingFraction: 1.0), value: animY)
+                    Circle().fill(dotColor).frame(width: 9, height: 9)
+                        .shadow(color: dotColor.opacity(0.7), radius: 5)
+                        .position(x: animX, y: animY)
+                    Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
+                        .position(x: animX, y: animY)
+                }
             }
 
             // Crosshair
@@ -912,6 +999,45 @@ struct AnimatableClipRect: Shape {
     var clipWidth: CGFloat
     var animatableData: CGFloat { get { clipWidth } set { clipWidth = newValue } }
     func path(in rect: CGRect) -> Path { Path(CGRect(x: 0, y: 0, width: max(0, clipWidth), height: rect.height)) }
+}
+
+/// Menggeser view (dot harga terakhir) mengikuti UJUNG garis yang sedang tumbuh
+/// kiri→kanan saat reveal pertama. `tipX` di-animate (= revealClipWidth); tiap
+/// frame kita cari y pada polyline `points` di x = tipX, lalu translate view
+/// (yang di-`position(x:0,y:0)`) ke titik itu. Karena `tipX` adalah
+/// `animatableData`, SwiftUI meng-interpolasi-nya per-frame sehingga dot benar-
+/// benar ikut merambat di sepanjang garis, bukan diam di posisi akhir.
+struct GrowingLineTip: GeometryEffect {
+    var tipX: CGFloat
+    let points: [CGPoint]
+
+    var animatableData: CGFloat {
+        get { tipX }
+        set { tipX = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        guard let first = points.first, let last = points.last else {
+            return ProjectionTransform()
+        }
+        let x = min(max(tipX, first.x), last.x)
+        let y = interpolatedY(atX: x)
+        return ProjectionTransform(CGAffineTransform(translationX: x, y: y))
+    }
+
+    /// y pada polyline (titik terurut menaik di x) untuk x tertentu.
+    private func interpolatedY(atX x: CGFloat) -> CGFloat {
+        guard let first = points.first, let last = points.last else { return 0 }
+        if x <= first.x { return first.y }
+        if x >= last.x  { return last.y }
+        for i in 1..<points.count where points[i].x >= x {
+            let p0 = points[i - 1], p1 = points[i]
+            let dx = p1.x - p0.x
+            let t  = dx == 0 ? 0 : (x - p0.x) / dx
+            return p0.y + (p1.y - p0.y) * t
+        }
+        return last.y
+    }
 }
 
 struct AnimatableClipAbove: Shape {

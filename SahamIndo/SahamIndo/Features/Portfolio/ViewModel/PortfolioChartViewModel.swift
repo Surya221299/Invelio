@@ -84,6 +84,33 @@ final class PortfolioChartViewModel: ObservableObject, ChartViewModelProtocol {
         let currentTotal = activeItems.reduce(0) { $0 + $1.value }
         guard currentTotal > 0 else { return [] }
 
+        let now = Date()
+        let cal = Calendar.current
+
+        // Anchor trajektori grafik ke MODAL (total cost basis) → nilai sekarang,
+        // supaya titik awal & arah grafik BENAR: posisi rugi turun, untung naik.
+        // Contoh: beli 10jt, sekarang -18% → grafik "Semua" mulai dari 10jt
+        // (profit 0 di tanggal beli) turun ke 8,2jt. Sebelumnya start selalu
+        // currentTotal*0.94 sehingga rugi pun tampil sebagai garis NAIK.
+        // `startValue(at:)` menginterpolasi nilai pada garis modal→sekarang untuk
+        // range yang lebih pendek (1W/1M/…). Fallback ke perilaku lama bila modal
+        // atau tanggal beli tidak tersedia.
+        let activeHoldings = holdings.filter { $0.quantity > 0 }
+        let costBasis      = activeHoldings.reduce(0) { $0 + $1.totalCostBasis }
+        let earliest       = activeHoldings.compactMap { $0.purchaseDate }.min()
+
+        func startValue(at windowStart: Date) -> Double {
+            // Selama modal diketahui, JANGAN pernah pakai fallback currentTotal*0.94
+            // (itu yang bikin titik awal salah, mis. 10jt tampil ~7,96jt).
+            guard costBasis > 0 else { return currentTotal * 0.94 }
+            guard let earliest else { return costBasis }   // tanpa tanggal beli → anggap window = sejak beli
+            let total = now.timeIntervalSince(earliest)
+            guard total > 0 else { return costBasis }
+            let clamped = max(windowStart, earliest)   // sebelum tanggal beli → modal penuh
+            let f = max(0, min(clamped.timeIntervalSince(earliest) / total, 1))
+            return costBasis + (currentTotal - costBasis) * f
+        }
+
         switch range {
         case .oneDay:
             return oneDaySlots(currentTotal: currentTotal)
@@ -92,30 +119,33 @@ final class PortfolioChartViewModel: ObservableObject, ChartViewModelProtocol {
             // 1W: satu titik per hari bursa aktif IDX — Sabtu, Minggu, dan
             // tanggal merah tidak masuk. Ini paralel dengan cara StockDetailView
             // mengonsumsi data candle real yang hanya berisi hari perdagangan.
-            return oneWeekTradingDays(currentTotal: currentTotal, holdings: holdings)
+            let winStart = cal.date(byAdding: .day, value: -7, to: now) ?? now
+            return oneWeekTradingDays(currentTotal: currentTotal,
+                                      startValue: startValue(at: winStart),
+                                      holdings: holdings)
 
         case .all:
             // All: tampilkan dari tanggal pembelian pertama sampai hari ini.
-            let now = Date()
-            let cal = Calendar.current
-            if let earliest = holdings.compactMap({ $0.purchaseDate }).min() {
+            if let earliest {
                 let days = max(cal.dateComponents([.day], from: earliest, to: now).day ?? 1, 1)
-                return walk(currentValue: currentTotal, days: days, startDate: earliest)
+                return walk(currentValue: currentTotal, startValue: startValue(at: earliest),
+                            days: days, startDate: earliest)
             }
-            // Fallback: tidak ada holding — tampilkan 7 hari terakhir
+            // Fallback: tidak ada tanggal beli — tampilkan 7 hari terakhir, tetap
+            // mulai dari modal bila diketahui.
             let fallbackStart = cal.date(byAdding: .day, value: -7, to: now) ?? now
-            return walk(currentValue: currentTotal, days: 7, startDate: fallbackStart)
+            return walk(currentValue: currentTotal, startValue: startValue(at: fallbackStart),
+                        days: 7, startDate: fallbackStart)
 
         default:
-            let now = Date()
-            let cal = Calendar.current
             var days = lookbackDays(for: range, now: now)
-            if let earliest = holdings.compactMap({ $0.purchaseDate }).min() {
+            if let earliest {
                 let sinceEarliest = max(cal.dateComponents([.day], from: earliest, to: now).day ?? days, 1)
                 days = min(days, sinceEarliest)
             }
             let start = cal.date(byAdding: .day, value: -days, to: now) ?? now
-            return walk(currentValue: currentTotal, days: days, startDate: start)
+            return walk(currentValue: currentTotal, startValue: startValue(at: start),
+                        days: days, startDate: start)
         }
     }
 
@@ -157,7 +187,7 @@ final class PortfolioChartViewModel: ObservableObject, ChartViewModelProtocol {
     /// jika hari ini libur/weekend.  `previousTradingDay(before:)` lalu mundur
     /// satu hari bursa per langkah — tidak pernah mendarat di Sabtu/Minggu/
     /// tanggal merah.  Semua titik bertanggal hari bursa nyata.
-    private static func oneWeekTradingDays(currentTotal: Double, holdings: [Holding]) -> [StockDataPoint] {
+    private static func oneWeekTradingDays(currentTotal: Double, startValue: Double, holdings: [Holding]) -> [StockDataPoint] {
         let cal      = IDXTradingCalendar.jakartaCalendar
         let now      = Date()
 
@@ -180,9 +210,8 @@ final class PortfolioChartViewModel: ObservableObject, ChartViewModelProtocol {
             return [point(date: now, value: currentTotal)]
         }
 
-        let count      = tradingDays.count
-        let startValue = currentTotal * 0.94
-        var values     = [Double](repeating: 0, count: count)
+        let count  = tradingDays.count
+        var values = [Double](repeating: 0, count: count)
         values[count - 1] = currentTotal
 
         var rng = SeededRandom(seed: UInt64(abs(currentTotal)) &+ UInt64(count) &+ 1)
@@ -223,7 +252,7 @@ final class PortfolioChartViewModel: ObservableObject, ChartViewModelProtocol {
     /// rata agar titik tetap dibatasi ≤90 (performa render), tapi titik
     /// terakhir selalu dijaga tepat di hari bursa terakhir agar anchor ke
     /// `currentValue` tetap akurat.
-    private static func walk(currentValue: Double, days: Int, startDate: Date) -> [StockDataPoint] {
+    private static func walk(currentValue: Double, startValue: Double, days: Int, startDate: Date) -> [StockDataPoint] {
         let cal  = IDXTradingCalendar.jakartaCalendar
         let now  = Date()
 
@@ -261,7 +290,6 @@ final class PortfolioChartViewModel: ObservableObject, ChartViewModelProtocol {
 
         var values = [Double](repeating: 0, count: pointCount)
         values[pointCount - 1] = currentValue
-        let startValue = currentValue * 0.94
 
         var rng = SeededRandom(seed: UInt64(abs(currentValue)) &+ UInt64(pointCount) &+ 1)
         for i in stride(from: pointCount - 2, through: 0, by: -1) {

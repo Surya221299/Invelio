@@ -21,6 +21,7 @@ final class DIContainer {
     lazy var chatRepository: ChatRepositoryProtocol           = ChatRepository()
     lazy var alertRepository: AlertRepositoryProtocol         = AlertRepository()
     lazy var portfolioRepository: PortfolioRepositoryProtocol = UserDefaultsPortfolioRepository()
+    lazy var portfolioHealthRepository: PortfolioHealthRepositoryProtocol = PortfolioHealthRepository()
 
     /// Repository untuk search universe simbol + analyze on-demand.
     /// Lazy singleton — tidak butuh lebih dari satu instance.
@@ -55,7 +56,8 @@ final class DIContainer {
             buyUseCase:          makeBuyUseCase(),
             sellUseCase:         makeSellUseCase(),
             portfolioRepository: portfolioRepository,
-            fetchChartUseCase:   makeFetchChartDataUseCase()
+            fetchChartUseCase:   makeFetchChartDataUseCase(),
+            healthRepository:    portfolioHealthRepository
         )
     }
 

@@ -45,6 +45,11 @@ struct PortfolioView: View {
                     onTrade:   { selectedStockForTrade = $0 }
                 )
 
+                if let health = vm.health {
+                    PortfolioDailyCard(health: health, isLoading: vm.isAnalyzingHealth)
+                    PortfolioHealthCard(health: health)
+                }
+
                 AIRecommendationsSectionView(
                     recommendations: aiRecommendations,
                     onTapItem:       { router.push(.stockDetail($0)) }
@@ -63,7 +68,7 @@ struct PortfolioView: View {
                 .presentationDetents([.large])
                 .environmentObject(vm)
         }
-        .task { await vm.fetchData() }
+        .task { await vm.fetchData(); await vm.analyzeHealth() }
     }
 
     // MARK: - Top Bar
@@ -142,7 +147,16 @@ struct PortfolioSummaryCardView: View {
                 Text("Total Assets")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                PortfolioValueAnimator()
+                // Saat men-scrub chart, tampilkan nilai portofolio pada titik yang
+                // dipilih (mengikuti crosshair). Di luar drag, kembalikan ke
+                // animator live (roll/flash dari nilai server).
+                if isDragging {
+                    Text(formatIDR(displayedValue))
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .foregroundColor(.primary)
+                } else {
+                    PortfolioValueAnimator()
+                }
                 let isPos = displayedGrowthPercent >= 0
                 HStack(spacing: 8) {
                     Text(isPos ? "+\(formatIDR(displayedProfitIDR))" : formatIDR(displayedProfitIDR))
@@ -200,7 +214,8 @@ struct PortfolioChartSectionView: View {
                 accentColor:       orange,
                 displayIsPositive: true,
                 fixedColor:        orange,
-                revealOnFirstLoad: true
+                revealOnFirstLoad: true,
+                useHighPriorityDrag: true
             )
             .frame(height: 180)
             .background(
@@ -472,7 +487,7 @@ struct TradeSheetView: View {
     }
     private var calculatedShares: Double { calculatedLots * 100.0 }
     private var subtotal:         Double { calculatedShares * price }
-    private var transactionFee:   Double { subtotal * (tradeType == 0 ? 0.0020 : 0.0030) }
+    private var transactionFee:   Double { subtotal * (tradeType == 0 ? 0.0 : 0.0030) }
     private var estTotal:         Double { tradeType == 0 ? subtotal + transactionFee : subtotal - transactionFee }
     private var ownedQty:         Double { vm.holdings.first { $0.symbol == stock.symbol }?.quantity ?? 0 }
 

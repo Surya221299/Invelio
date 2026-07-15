@@ -11,7 +11,8 @@ import Foundation
 // MARK: - Constants
 
 private enum TradingFee {
-    static let buy:  Double = 0.0020
+    // Fee beli dihilangkan (0%) — beli 10jt = modal tercatat 10jt, tanpa potongan.
+    static let buy:  Double = 0.0
     static let sell: Double = 0.0030
 }
 

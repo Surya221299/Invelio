@@ -32,6 +32,8 @@ enum APIEndpoint {
     case earnings(symbol: String)
     /// Rally streak (hari hijau berturut-turut) per emiten
     case rallyStreak(symbol: String)
+    /// Analisis kesehatan portofolio + narasi harian (POST body holdings)
+    case analyzePortfolio
 
     enum InsightType: String {
         case sentimentNews  = "sentimen-berita"
@@ -69,6 +71,7 @@ enum APIEndpoint {
         case .removeWatchlist(let kode):       return "/api/saham/\(kode)/watchlist"
         case .earnings(let s):                 return "/saham/\(s)/earnings"
         case .rallyStreak(let s):              return "/saham/\(s)/rally-streak"
+        case .analyzePortfolio:                return "/portfolio/analyze"
         }
     }
 
@@ -78,6 +81,7 @@ enum APIEndpoint {
         case .analyzeSaham, .addWatchlist: return "POST"
         case .removeWatchlist:             return "DELETE"
         case .chat:                        return "POST"
+        case .analyzePortfolio:            return "POST"
         default:                           return "GET"
         }
     }
@@ -115,7 +119,7 @@ final class APIClient {
         "http://100.118.29.16:8080",
         "http://100.70.203.11:8080",
     ]
-    private static let fallbackURL = "http://192.168.0.106:8080"
+    private static let fallbackURL = "http://10.67.50.109:8080"
 
     static func resolveBaseURL() async -> String {
         if let cached = resolvedBaseURL { return cached }
@@ -204,6 +208,30 @@ final class APIClient {
         req.httpMethod = endpoint.method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 300  // analyze on-demand bisa butuh waktu (LLM lokal)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw APIError.httpError(http.statusCode)
+        }
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch let err {
+            if let raw = String(data: data, encoding: .utf8) {
+                print("[APIClient] Raw (300): \(raw.prefix(300))")
+            }
+            throw APIError.decodingError(err)
+        }
+    }
+
+    // MARK: - POST dengan JSON body (response JSON)
+
+    static func post<T: Decodable, B: Encodable>(_ endpoint: APIEndpoint, body: B, as type: T.Type) async throws -> T {
+        let base = await resolveBaseURL()
+        guard let url = URL(string: base + endpoint.path) else { throw APIError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = endpoint.method
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 300  // analisis portofolio memanggil LLM lokal
+        req.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: req)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             throw APIError.httpError(http.statusCode)

@@ -232,7 +232,8 @@ class TestScoringEngine(unittest.TestCase):
         # Skor fundamental harus netral (50.0) karena fallback desimal
         self.assertEqual(result["skor_per_saham"][0]["skor_fundamental"], 50.0)
         # Memastikan scrape_and_save_fundamental_for_emiten dipanggil
-        mock_scrape.assert_called_once_with("BBCA")
+        # (dengan market eksplisit sejak dukungan multi-market IDX/US)
+        mock_scrape.assert_called_once_with("BBCA", market="IDX")
 
     @patch("backend.agents.scoring_agent.async_session")
     @patch("backend.agents.scoring_agent.asyncio.create_task")

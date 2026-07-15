@@ -58,23 +58,30 @@ async def cek_berita_baru(state: AlertState) -> dict[str, Any]:
     logger.info("🚨 NODE 1: Cek Berita Baru")
     logger.info("=" * 60)
 
-    # 1. Dapatkan watchlist aktif dari database
+    # 1. Dapatkan watchlist aktif dari database (ikut ambil market untuk locale berita)
     try:
         async with async_session() as session:
-            result = await session.execute(select(Saham.kode).where(Saham.is_watchlist == True))
-            watchlist = result.scalars().all()
+            result = await session.execute(
+                select(Saham.kode, Saham.market).where(Saham.is_watchlist == True)
+            )
+            rows = result.all()
     except Exception as e:
         logger.error(f"❌ Gagal mengambil watchlist saham: {e}")
         return {"berita_baru": []}
 
-    if not watchlist:
+    if not rows:
         logger.warning("⚠️ Watchlist saham kosong. Monitoring dibatalkan.")
         return {"berita_baru": []}
+
+    watchlist = [row.kode for row in rows]
+    market_map = {row.kode.strip().upper(): (row.market or "IDX") for row in rows}
 
     # 2. Collect berita untuk semua saham (batch) untuk 2 hari terakhir
     logger.info(f"📰 Mengambil berita terkini untuk {len(watchlist)} saham...")
     try:
-        berita_didapat = await collect_berita_batch(list(watchlist), hari_terakhir=2)
+        berita_didapat = await collect_berita_batch(
+            watchlist, hari_terakhir=2, market_map=market_map
+        )
     except Exception as e:
         logger.error(f"❌ Gagal mengambil berita batch: {e}")
         return {"berita_baru": []}
