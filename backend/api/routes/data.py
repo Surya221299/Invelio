@@ -250,6 +250,26 @@ async def get_makro_fedwatch():
     return await collect_fedwatch()
 
 
+@router.get("/makro/kalender")
+@router.get("/data/makro/kalender")
+async def get_makro_kalender():
+    """
+    Kalender faktor makro AS yang menggerakkan pasar saham: jadwal rilis
+    berikutnya + penjelasan/dampak (inflasi, tenaga kerja, data ekonomi lain,
+    fiskal/politik) plus yield US Treasury 10Y LIVE (yfinance ^TNX).
+
+    Bentuk respons cocok dengan `MacroCalendarResponseDTO` di iOS:
+        { as_of, treasury_10y: { yield, change, ... },
+          categories: [{ key, title, icon, items: [{ name, schedule_label,
+                         next_release, is_estimate, impact }] }] }
+
+    Selalu 200. Tanggal rilis adalah PERKIRAAN terjadwal (is_estimate=true);
+    lihat backend/data/collectors/makro_calendar_collector.py.
+    """
+    from backend.data.collectors.makro_calendar_collector import collect_makro_calendar
+    return await collect_makro_calendar()
+
+
 import time
 
 # In-memory caches for yfinance fetches

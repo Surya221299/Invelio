@@ -25,6 +25,7 @@ struct ReleaseView: View {
                 meetingCard
                 chartCard
                 caption
+                macroSection
             }
             .padding(20)
         }
@@ -104,6 +105,181 @@ struct ReleaseView: View {
         Text("Probabilitas tersirat dari harga 30-Day Fed Funds futures (ZQ). Sumber diproses backend.")
             .font(.caption)
             .foregroundColor(.secondary)
+    }
+
+    // MARK: - Faktor Makro (di bawah chart FedWatch)
+
+    private var macroSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Text("Faktor Makro Pemerintah AS")
+                    .font(.title3).fontWeight(.bold)
+                    .foregroundColor(.primary)
+                if vm.macroCalendar.source == .placeholder {
+                    Text("contoh")
+                        .font(.caption2).fontWeight(.semibold)
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.PrimaryYellow)
+                        .clipShape(Capsule())
+                }
+            }
+
+            if let t = vm.macroCalendar.treasury10Y {
+                TreasuryYieldCard(yield: t)
+            }
+
+            ForEach(vm.macroCalendar.categories) { category in
+                MacroCategoryCard(category: category)
+            }
+
+            Text("Tanggal rilis adalah perkiraan terjadwal (mis. NFP = Jumat pertama, jobless claims = tiap Kamis) — verifikasi dengan kalender resmi BLS/BEA. Yield UST 10Y diambil live dari pasar.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+}
+
+// MARK: - TreasuryYieldCard
+
+/// Kartu yield US Treasury 10Y (satu-satunya angka live di section makro).
+struct TreasuryYieldCard: View {
+
+    let yield: TreasuryYield
+
+    private var changeColor: Color { yield.isUp ? .green : .red }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: "dollarsign.circle.fill")
+                .font(.system(size: 30))
+                .foregroundColor(Color.PrimaryYellow)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Yield US Treasury 10 Tahun")
+                    .font(.subheadline).fontWeight(.semibold)
+                    .foregroundColor(.primary)
+                Text("Yield naik tajam → saham (terutama tech) tertekan.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(String(format: "%.2f%%", yield.value))
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .foregroundColor(.primary)
+                HStack(spacing: 2) {
+                    Image(systemName: yield.isUp ? "arrow.up.right" : "arrow.down.right")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(String(format: "%+.2f", yield.change))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                }
+                .foregroundColor(changeColor)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+// MARK: - MacroCategoryCard
+
+/// Kartu satu kategori faktor makro (mis. "Data Inflasi") berisi daftar
+/// indikator + jadwal rilis + penjelasan dampak ke pasar.
+struct MacroCategoryCard: View {
+
+    let category: MacroCategory
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: category.icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Color.PrimaryYellow)
+                Text(category.title)
+                    .font(.subheadline).fontWeight(.bold)
+                    .foregroundColor(.primary)
+            }
+
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(category.items.enumerated()), id: \.element.id) { index, item in
+                    if index > 0 {
+                        Divider().overlay(Color.white.opacity(0.08))
+                            .padding(.vertical, 10)
+                    }
+                    MacroIndicatorRow(item: item)
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+// MARK: - MacroIndicatorRow
+
+struct MacroIndicatorRow: View {
+
+    let item: MacroCalendarItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(item.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.primary)
+                Spacer(minLength: 8)
+                if let rel = relativeLabel {
+                    Text(rel)
+                        .font(.caption2).fontWeight(.semibold)
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Color.PrimaryYellow.opacity(0.9))
+                        .clipShape(Capsule())
+                }
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "calendar")
+                    .font(.system(size: 10))
+                Text(scheduleText)
+                    .font(.caption)
+            }
+            .foregroundColor(.secondary)
+
+            Text(item.impact)
+                .font(.caption)
+                .foregroundColor(.secondary.opacity(0.9))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Baris jadwal: tanggal rilis (ET) kalau ada, jika tidak pakai label jadwal.
+    private var scheduleText: String {
+        guard let date = item.nextRelease else { return item.scheduleLabel }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "id_ID")
+        f.timeZone = TimeZone(identifier: "America/New_York")
+        f.dateFormat = "EEE, d MMM yyyy · HH:mm"
+        let prefix = item.isEstimate ? "≈ " : ""
+        return "\(prefix)\(f.string(from: date)) ET"
+    }
+
+    /// Badge "N hari lagi" / "hari ini" untuk rilis mendatang.
+    private var relativeLabel: String? {
+        guard let date = item.nextRelease else { return nil }
+        let days = Calendar.current.dateComponents([.day], from: Date(), to: date).day ?? 0
+        if days < 0 { return nil }
+        if days == 0 { return "hari ini" }
+        if days == 1 { return "besok" }
+        return "\(days) hari lagi"
     }
 }
 

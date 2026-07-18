@@ -18,6 +18,9 @@ enum APIEndpoint {
     /// Probabilitas CME FedWatch (target range suku bunga Fed) — dihitung
     /// backend supaya kredensial/scraping ada di server, bukan di app.
     case fedwatch
+    /// Kalender faktor makro AS (jadwal rilis + edukasi + yield UST 10Y live) —
+    /// dihitung backend, ditampilkan di bawah chart FedWatch pada tab Release.
+    case macroCalendar
     case weeklyRecommendations
     case insight(type: InsightType)
     case chat
@@ -65,6 +68,7 @@ enum APIEndpoint {
         case .alerts:                          return "/api/alerts"
         case .macroLatest:                     return "/makro/terbaru"
         case .fedwatch:                        return "/makro/fedwatch"
+        case .macroCalendar:                   return "/makro/kalender"
         case .weeklyRecommendations:           return "/rekomendasi/mingguan"
         case .insight(let t):                  return "/ai/insights/\(t.rawValue)"
         case .chat:                            return "/chat"
