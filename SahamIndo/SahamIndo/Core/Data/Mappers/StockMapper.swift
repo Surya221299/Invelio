@@ -124,4 +124,30 @@ enum StockMapper {
             isRallying: dto.is_rally_streak
         )
     }
+
+    static func toAnalystRatings(_ dto: AnalystRatingsDTO) -> AnalystRatings {
+        AnalystRatings(
+            symbol: dto.kode_saham,
+            consensus: dto.consensus.map {
+                AnalystConsensus(current: $0.current, low: $0.low, high: $0.high,
+                                 mean: $0.mean, median: $0.median)
+            },
+            distribution: dto.distribution.map {
+                RatingDistribution(strongBuy: $0.strong_buy, buy: $0.buy, hold: $0.hold,
+                                   sell: $0.sell, strongSell: $0.strong_sell)
+            },
+            history: dto.history.map { row in
+                AnalystRatingRow(
+                    date:              row.date.flatMap { parseFlexibleDate($0) },
+                    firm:              row.firm,
+                    toGrade:           row.to_grade,
+                    fromGrade:         row.from_grade,
+                    action:            row.action,
+                    priceTargetAction: row.price_target_action,
+                    currentPT:         row.current_pt,
+                    priorPT:           row.prior_pt
+                )
+            }
+        )
+    }
 }

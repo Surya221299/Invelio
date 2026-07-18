@@ -24,12 +24,21 @@ protocol StockDetailRepositoryProtocol {
     func fetchDetail(symbol: String) async throws -> StockDetail
     func fetchEarningsInfo(symbol: String) async throws -> EarningsInfo
     func fetchRallyStreak(symbol: String) async throws -> RallyStreakInfo
+    func fetchAnalystRatings(symbol: String, market: String?) async throws -> AnalystRatings
 }
 
 // MARK: - Chart / Candle Data
 
 protocol ChartRepositoryProtocol {
-    func fetchCandles(symbol: String, range: TimeRange) async -> (dataPoints: [StockDataPoint], cacheState: CacheState)
+    func fetchCandles(symbol: String, range: TimeRange, market: String?) async -> (dataPoints: [StockDataPoint], cacheState: CacheState)
+}
+
+extension ChartRepositoryProtocol {
+    /// Convenience: fetch tanpa market (backend akan menebak — hanya aman untuk
+    /// simbol IDX). Dipertahankan supaya call-site lama tidak perlu diubah.
+    func fetchCandles(symbol: String, range: TimeRange) async -> (dataPoints: [StockDataPoint], cacheState: CacheState) {
+        await fetchCandles(symbol: symbol, range: range, market: nil)
+    }
 }
 
 // MARK: - AI Market Insights

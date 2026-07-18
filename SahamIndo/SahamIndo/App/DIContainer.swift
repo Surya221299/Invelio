@@ -18,6 +18,7 @@ final class DIContainer {
     lazy var detailRepository: StockDetailRepositoryProtocol  = StockDetailRepository()
     lazy var chartRepository: ChartRepositoryProtocol         = ChartRepository()
     lazy var insightRepository: InsightRepositoryProtocol     = InsightRepository()
+    lazy var fedWatchRepository: FedWatchRepositoryProtocol    = FedWatchRepository()
     lazy var chatRepository: ChatRepositoryProtocol           = ChatRepository()
     lazy var alertRepository: AlertRepositoryProtocol         = AlertRepository()
     lazy var portfolioRepository: PortfolioRepositoryProtocol = UserDefaultsPortfolioRepository()
@@ -71,6 +72,10 @@ final class DIContainer {
 
     func makeChatViewModel() -> ChatViewModel {
         ChatViewModel(chatRepository: chatRepository)
+    }
+
+    func makeReleaseViewModel() -> ReleaseViewModel {
+        ReleaseViewModel(fedWatchRepository: fedWatchRepository)
     }
 
     func makeNotificationViewModel() -> NotificationViewModel {

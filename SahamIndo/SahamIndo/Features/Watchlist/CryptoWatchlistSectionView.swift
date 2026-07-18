@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct CryptoWatchlistSectionView: View {
 
@@ -170,6 +171,11 @@ struct CryptoRowView: View {
     let symbol: String
     let ticker: CryptoTicker?
 
+    /// Data historis 24 jam untuk mini-sparkline (klines Binance) — sumbernya
+    /// beda dari saham (yang lewat backend/candles kita), tapi tampilannya
+    /// dibikin sama persis lewat CryptoSparklineView.
+    @StateObject private var sparklineVM = CryptoSparklineViewModel()
+
     /// State untuk animasi flash warna (hijau naik / merah turun) di angka
     /// harga. Efek "rolling digit" (kayak odometer/speedometer) ditangani
     /// oleh RollingCryptoPriceView + RollingPriceDigit (dipakai bareng
@@ -188,7 +194,10 @@ struct CryptoRowView: View {
                 Text(displayName).font(.system(size: 15, weight: .bold))
                 Text(symbol).font(.system(size: 11)).foregroundColor(.secondary)
             }
-            Spacer()
+            Spacer(minLength: 0)
+            CryptoSparklineView(vm: sparklineVM)
+                .frame(width: DesignSize.sparklineWidth, height: DesignSize.sparklineHeight)
+                .padding(.trailing, 8)
             VStack(alignment: .trailing, spacing: 2) {
                 if let ticker {
                     // Cuma teks angkanya yang nge-flash & "roll" per-digit —
@@ -207,6 +216,10 @@ struct CryptoRowView: View {
                     ProgressView().frame(width: 60, height: 20)
                 }
             }
+        }
+        .task(id: symbol) { await sparklineVM.fetch(symbol: symbol) }
+        .onReceive(Timer.publish(every: 2 * 60, on: .main, in: .common).autoconnect()) { _ in
+            Task { await sparklineVM.fetch(symbol: symbol) }
         }
         .onChange(of: ticker?.lastPrice) { oldValue, newValue in
             triggerFlash(old: oldValue, new: newValue)
@@ -254,6 +267,137 @@ struct RollingCryptoPriceView: View {
                     Text(String(token.char)).font(.system(size: fontSize, weight: .semibold, design: .rounded))
                 }
             }
+        }
+    }
+}
+
+// MARK: - CryptoSparklineViewModel
+//
+// Mengambil klines 24 jam terakhir langsung dari REST Binance (interval 15m,
+// 96 candle = 24 jam) untuk digambar sebagai mini-sparkline di row watchlist.
+// Sengaja TIDAK lewat backend kita — konsisten dengan BinanceLiveStore yang
+// juga langsung ke Binance. Response klines Binance bertipe campuran
+// (angka + string dalam satu array), jadi di-parse via JSONSerialization.
+
+@MainActor
+final class CryptoSparklineViewModel: ObservableObject {
+    @Published private(set) var closes: [Double] = []
+
+    func fetch(symbol: String) async {
+        let sym = symbol.uppercased()
+        guard let url = URL(string:
+            "https://api.binance.com/api/v3/klines?symbol=\(sym)&interval=15m&limit=96")
+        else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let rows = try JSONSerialization.jsonObject(with: data) as? [[Any]] else { return }
+            // index 4 = harga close (Binance kirim sebagai String).
+            let parsed: [Double] = rows.compactMap { row in
+                guard row.count > 4 else { return nil }
+                if let s = row[4] as? String  { return Double(s) }
+                if let n = row[4] as? NSNumber { return n.doubleValue }
+                return nil
+            }
+            guard !parsed.isEmpty else { return }
+            self.closes = parsed
+        } catch {
+            // Diamkan — sparkline sekadar kosong kalau gagal, tidak fabrikasi data.
+        }
+    }
+}
+
+// MARK: - CryptoSparklineView
+//
+// Versi ringkas dari MiniSparklineView (saham): karena crypto 24/7 tidak ada
+// konsep jam bursa / slot, titik cukup di-spasikan rata. Warna dibelah di
+// baseline = harga 24 jam lalu (closes[0]) — hijau di atas, merah di bawah —
+// biar konsisten dengan % change 24 jam yang ditampilkan di sebelahnya.
+
+struct CryptoSparklineView: View {
+
+    @ObservedObject var vm: CryptoSparklineViewModel
+
+    private let green = Color.ProfitGreen
+    private let red   = Color.LossRed
+
+    var body: some View {
+        Canvas { ctx, size in
+            let closes = vm.closes
+            guard closes.count > 1 else { return }
+
+            let startVal = closes[0]
+            let minVal   = closes.min()!
+            let maxVal   = closes.max()!
+            let range    = max(maxVal - minVal, 1e-9)
+            let w = size.width; let h = size.height; let padV: CGFloat = 4
+            let usableH  = h - padV * 2
+
+            func xFor(_ i: Int) -> CGFloat { CGFloat(i) / CGFloat(closes.count - 1) * w }
+            func yFor(_ v: Double) -> CGFloat { padV + usableH * (1 - CGFloat((v - minVal) / range)) }
+
+            let startY = yFor(startVal)
+
+            func buildArea(closeY: CGFloat) -> Path {
+                var p = Path()
+                p.move(to: CGPoint(x: xFor(0), y: closeY))
+                for i in 0..<closes.count {
+                    let x = xFor(i); let y = yFor(closes[i])
+                    if i == 0 { p.addLine(to: CGPoint(x: x, y: y)) }
+                    else {
+                        let px = xFor(i - 1); let py = yFor(closes[i - 1])
+                        p.addCurve(to: CGPoint(x: x, y: y),
+                                   control1: CGPoint(x: px + (x - px) * 0.5, y: py),
+                                   control2: CGPoint(x: px + (x - px) * 0.5, y: y))
+                    }
+                }
+                p.addLine(to: CGPoint(x: xFor(closes.count - 1), y: closeY))
+                p.closeSubpath(); return p
+            }
+
+            func buildLine() -> Path {
+                var p = Path()
+                for i in 0..<closes.count {
+                    let x = xFor(i); let y = yFor(closes[i])
+                    if i == 0 { p.move(to: CGPoint(x: x, y: y)) }
+                    else {
+                        let px = xFor(i - 1); let py = yFor(closes[i - 1])
+                        p.addCurve(to: CGPoint(x: x, y: y),
+                                   control1: CGPoint(x: px + (x - px) * 0.5, y: py),
+                                   control2: CGPoint(x: px + (x - px) * 0.5, y: y))
+                    }
+                }
+                return p
+            }
+
+            let lineStyle = StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round)
+            let line = buildLine()
+
+            ctx.drawLayer { layer in
+                layer.clip(to: Path(CGRect(x: 0, y: 0, width: w, height: startY)))
+                layer.fill(buildArea(closeY: startY), with: .linearGradient(
+                    Gradient(stops: [.init(color: green.opacity(0.18), location: 0),
+                                     .init(color: green.opacity(0.06), location: 1)]),
+                    startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: startY)))
+                layer.stroke(line, with: .color(green), style: lineStyle)
+            }
+            ctx.drawLayer { layer in
+                layer.clip(to: Path(CGRect(x: 0, y: startY, width: w, height: h - startY)))
+                layer.fill(buildArea(closeY: h), with: .linearGradient(
+                    Gradient(stops: [.init(color: red.opacity(0.18), location: 0),
+                                     .init(color: red.opacity(0.04), location: 1)]),
+                    startPoint: CGPoint(x: 0, y: startY), endPoint: CGPoint(x: 0, y: h)))
+                layer.stroke(line, with: .color(red), style: lineStyle)
+            }
+
+            let lastY     = yFor(closes.last!)
+            let lastColor = closes.last! >= startVal ? green : red
+            var dash = Path()
+            dash.move(to: CGPoint(x: 0, y: lastY)); dash.addLine(to: CGPoint(x: w, y: lastY))
+            ctx.stroke(dash, with: .color(lastColor.opacity(0.5)),
+                       style: StrokeStyle(lineWidth: 0.75, dash: [3, 3]))
+            let dotX = xFor(closes.count - 1); let dotR: CGFloat = 2.5
+            ctx.fill(Path(ellipseIn: CGRect(x: dotX - dotR, y: lastY - dotR, width: dotR * 2, height: dotR * 2)),
+                     with: .color(lastColor))
         }
     }
 }

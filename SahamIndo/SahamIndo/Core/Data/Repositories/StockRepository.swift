@@ -53,6 +53,11 @@ final class StockDetailRepository: StockDetailRepositoryProtocol {
         let dto = try await APIClient.get(.rallyStreak(symbol: symbol), as: RallyStreakDTO.self)
         return StockMapper.toRallyStreakInfo(dto)
     }
+
+    func fetchAnalystRatings(symbol: String, market: String?) async throws -> AnalystRatings {
+        let dto = try await APIClient.get(.analystRatings(symbol: symbol, market: market), as: AnalystRatingsDTO.self)
+        return StockMapper.toAnalystRatings(dto)
+    }
 }
 
 // MARK: - ChartRepository
@@ -61,21 +66,26 @@ final class ChartRepository: ChartRepositoryProtocol {
 
     private let cache = StockCacheManager.shared
 
-    func fetchCandles(symbol: String, range: TimeRange) async -> (dataPoints: [StockDataPoint], cacheState: CacheState) {
+    func fetchCandles(symbol: String, range: TimeRange, market: String?) async -> (dataPoints: [StockDataPoint], cacheState: CacheState) {
         do {
-            let dtos = try await APIClient.get(.candles(symbol: symbol, range: range.rawValue), as: [CandleDTO].self)
+            let dtos = try await APIClient.get(.candles(symbol: symbol, range: range.rawValue, market: market), as: [CandleDTO].self)
             let points = StockMapper.toDataPoints(dtos)
             cache.save(candles: points, symbol: symbol, range: range)
             return (points, .live)
         } catch {
-            print("[ChartRepository] offline (\(symbol)/\(range.rawValue)):", error.localizedDescription)
+            print("[ChartRepository] fetch failed (\(symbol)/\(range.rawValue)):", error.localizedDescription)
             if let cached = cache.loadCandles(symbol: symbol, range: range) {
                 let age = cache.cacheAgeString(symbol: symbol, range: range) ?? "?"
                 return (cached.candles, .cached(age: age))
             }
-            // Last-resort: generate dummy data
-            let dummy = IDXDummyPriceGenerator.generate(symbol: symbol, range: range)
-            return (dummy, .noData)
+            // JANGAN fabrikasi harga. IDXDummyPriceGenerator menghasilkan random
+            // walk (base dari symbol.hashValue yang di-seed acak tiap run +
+            // Double.random per candle), jadi harga saham yang benar-benar tidak
+            // punya data di backend (mis. hasil search yang tidak dimonitor) akan
+            // tampil sebagai harga palsu yang berbeda-beda tiap buka. Untuk app
+            // finansial ini menyesatkan — lebih baik tampilkan "data tidak
+            // tersedia" (dataPoints kosong → UI sudah menanganinya).
+            return ([], .noData)
         }
     }
 }

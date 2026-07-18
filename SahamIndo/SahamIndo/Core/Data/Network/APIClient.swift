@@ -11,10 +11,13 @@ enum APIEndpoint {
     case status
     case allStocks
     case stock(symbol: String)
-    case candles(symbol: String, range: String)
+    case candles(symbol: String, range: String, market: String?)
     case stockDetail(symbol: String)
     case alerts
     case macroLatest
+    /// Probabilitas CME FedWatch (target range suku bunga Fed) — dihitung
+    /// backend supaya kredensial/scraping ada di server, bukan di app.
+    case fedwatch
     case weeklyRecommendations
     case insight(type: InsightType)
     case chat
@@ -32,6 +35,9 @@ enum APIEndpoint {
     case earnings(symbol: String)
     /// Rally streak (hari hijau berturut-turut) per emiten
     case rallyStreak(symbol: String)
+    /// Perkiraan analis (konsensus price target, distribusi rekomendasi,
+    /// riwayat rating action) per emiten
+    case analystRatings(symbol: String, market: String?)
     /// Analisis kesehatan portofolio + narasi harian (POST body holdings)
     case analyzePortfolio
 
@@ -46,10 +52,19 @@ enum APIEndpoint {
         case .status:                          return "/api/status"
         case .allStocks:                       return "/stocks"
         case .stock(let s):                    return "/stocks/\(s)"
-        case .candles(let s, let r):           return "/stocks/\(s)/candles?range=\(r)"
+        case .candles(let s, let r, let market):
+            var p = "/stocks/\(s)/candles?range=\(r)"
+            // Kirim market supaya backend tidak default ke IDX untuk simbol
+            // non-IDX (mis. ASML/NASDAQ) — tanpa ini harga bisa salah karena
+            // backend menebak market. Sama pola dengan endpoint analyze.
+            if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                p += "&market=\(enc)"
+            }
+            return p
         case .stockDetail(let s):              return "/rekomendasi/saham/\(s)"
         case .alerts:                          return "/api/alerts"
         case .macroLatest:                     return "/makro/terbaru"
+        case .fedwatch:                        return "/makro/fedwatch"
         case .weeklyRecommendations:           return "/rekomendasi/mingguan"
         case .insight(let t):                  return "/ai/insights/\(t.rawValue)"
         case .chat:                            return "/chat"
@@ -71,6 +86,12 @@ enum APIEndpoint {
         case .removeWatchlist(let kode):       return "/api/saham/\(kode)/watchlist"
         case .earnings(let s):                 return "/saham/\(s)/earnings"
         case .rallyStreak(let s):              return "/saham/\(s)/rally-streak"
+        case .analystRatings(let s, let market):
+            var p = "/saham/\(s)/analis"
+            if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                p += "?market=\(enc)"
+            }
+            return p
         case .analyzePortfolio:                return "/portfolio/analyze"
         }
     }
@@ -115,11 +136,15 @@ final class APIClient {
     private static var resolvedBaseURL: String?
 
     private static let candidateURLs = [
+        // localhost lebih dulu supaya iOS Simulator langsung menjangkau backend
+        // lokal (uvicorn di Mac) tanpa Tailscale/LAN.
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
         "http://100.121.215.111:8080",
         "http://100.118.29.16:8080",
         "http://100.70.203.11:8080",
     ]
-    private static let fallbackURL = "http://10.67.50.109:8080"
+    private static let fallbackURL = "http://192.168.0.112:8080"
 
     static func resolveBaseURL() async -> String {
         if let cached = resolvedBaseURL { return cached }

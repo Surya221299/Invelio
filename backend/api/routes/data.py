@@ -232,6 +232,24 @@ async def get_makro_terbaru(db: AsyncSession = Depends(get_db_session)):
         )
 
 
+@router.get("/makro/fedwatch")
+@router.get("/data/makro/fedwatch")
+async def get_makro_fedwatch():
+    """
+    Probabilitas CME FedWatch (target range suku bunga Fed) untuk rapat FOMC
+    berikutnya, dihitung dari futures 30-Day Fed Funds (ZQ) via yfinance.
+
+    Bentuk respons cocok dengan `FedWatchResponseDTO` di iOS:
+        { meeting_label, as_of, source, outcomes: [{ range_label, probability }] }
+
+    Selalu 200 (fallback placeholder bila data futures tak tersedia). Lihat
+    backend/data/collectors/fedwatch_collector.py untuk metodologi & konfigurasi
+    (tanggal FOMC + target range saat ini WAJIB diverifikasi).
+    """
+    from backend.data.collectors.fedwatch_collector import collect_fedwatch
+    return await collect_fedwatch()
+
+
 import time
 
 # In-memory caches for yfinance fetches
@@ -995,6 +1013,130 @@ async def get_rally_streak(
     result = compute_rally_streak(candles)
     result["kode_saham"] = kode_upper
     return result
+
+
+_yf_analyst_cache = {}
+YF_ANALYST_CACHE_TTL = 6 * 3600  # 6 jam — rating analis jarang berubah dalam sehari
+
+
+def fetch_analyst_ratings(symbol: str, market: str = "NASDAQ", history_limit: int = 15) -> dict:
+    """
+    Mengambil data perkiraan analis dari yfinance:
+      1. Konsensus price target (current/low/high/mean/median).
+      2. Distribusi rekomendasi terbaru (strongBuy/buy/hold/sell/strongSell).
+      3. Riwayat rating action per firma (upgrade/downgrade + perubahan target).
+
+    CATATAN: cakupan data analis paling lengkap untuk saham AS (mis. MU, NVDA);
+    untuk emiten IDX sering kosong. Selalu tampilkan sebagai PERKIRAAN.
+    """
+    symbol_upper = symbol.strip().upper()
+    market_clean = normalize_market(market)
+    cache_key = (symbol_upper, market_clean)
+    now = time.time()
+
+    if cache_key in _yf_analyst_cache:
+        cached_time, cached_data = _yf_analyst_cache[cache_key]
+        if now - cached_time < YF_ANALYST_CACHE_TTL:
+            return cached_data
+
+    result: dict[str, Any] = {
+        "kode_saham": symbol_upper,
+        "consensus": None,
+        "distribution": None,
+        "history": [],
+        "sumber": "yfinance",
+    }
+
+    def _f(v):
+        try:
+            return float(v) if v is not None and pd.notna(v) else None
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        ticker = yf.Ticker(get_yf_symbol(symbol_upper, market_clean))
+
+        # 1. Konsensus price target
+        try:
+            apt = ticker.analyst_price_targets
+            if isinstance(apt, dict) and apt:
+                result["consensus"] = {
+                    "current": _f(apt.get("current")),
+                    "low":     _f(apt.get("low")),
+                    "high":    _f(apt.get("high")),
+                    "mean":    _f(apt.get("mean")),
+                    "median":  _f(apt.get("median")),
+                }
+        except Exception as e:
+            logger.warning(f"analyst_price_targets {symbol_upper}: {e}")
+
+        # 2. Distribusi rekomendasi (baris periode terbaru = 0m)
+        try:
+            rec = ticker.recommendations
+            if rec is not None and not rec.empty:
+                row = rec.iloc[0]
+                def _i(key):
+                    v = row.get(key)
+                    return int(v) if pd.notna(v) else 0
+                result["distribution"] = {
+                    "strong_buy":  _i("strongBuy"),
+                    "buy":         _i("buy"),
+                    "hold":        _i("hold"),
+                    "sell":        _i("sell"),
+                    "strong_sell": _i("strongSell"),
+                }
+        except Exception as e:
+            logger.warning(f"recommendations {symbol_upper}: {e}")
+
+        # 3. Riwayat rating action (terbaru dulu)
+        try:
+            ud = ticker.upgrades_downgrades
+            if ud is not None and not ud.empty:
+                ud = ud.sort_index(ascending=False).head(history_limit)
+                for gdate, row in ud.iterrows():
+                    result["history"].append({
+                        "date": gdate.isoformat() if hasattr(gdate, "isoformat") else str(gdate),
+                        "firm":                str(row.get("Firm") or ""),
+                        "to_grade":            str(row.get("ToGrade") or ""),
+                        "from_grade":          str(row.get("FromGrade") or ""),
+                        "action":              str(row.get("Action") or ""),
+                        "price_target_action": str(row.get("priceTargetAction") or ""),
+                        "current_pt":          _f(row.get("currentPriceTarget")),
+                        "prior_pt":            _f(row.get("priorPriceTarget")),
+                    })
+        except Exception as e:
+            logger.warning(f"upgrades_downgrades {symbol_upper}: {e}")
+
+    except Exception as e:
+        logger.error(f"Gagal mengambil data analis untuk {symbol_upper}: {e}")
+
+    _yf_analyst_cache[cache_key] = (now, result)
+    return result
+
+
+@router.get("/saham/{kode}/analis")
+@router.get("/data/saham/{kode}/analis")
+async def get_analyst_ratings(
+    kode: str,
+    market: str | None = None,
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Data perkiraan analis (konsensus price target, distribusi rekomendasi,
+    riwayat rating action) untuk satu emiten. `market` opsional — kalau tidak
+    dikirim, ditebak dari DB, lalu default non-IDX (US) supaya saham hasil
+    Search (mis. MU) tetap dapat data tanpa harus terdaftar di watchlist.
+    """
+    kode_upper = kode.strip().upper()
+    resolved_market = market
+    if not resolved_market:
+        res = await db.execute(select(Saham).where(Saham.kode == kode_upper))
+        saham_obj = res.scalar_one_or_none()
+        resolved_market = saham_obj.market if saham_obj else "NASDAQ"
+
+    loop = asyncio.get_running_loop()
+    info = await loop.run_in_executor(None, fetch_analyst_ratings, kode_upper, resolved_market)
+    return info
 
 
 @router.get("/stocks")

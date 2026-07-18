@@ -446,6 +446,13 @@ struct TradeSheetView: View {
     @EnvironmentObject private var vm: PortfolioViewModel
 
     let stock: PortfolioItem
+    /// Tipe transaksi awal saat sheet dibuka (0 = Beli, 1 = Jual).
+    /// Default 0 supaya call-site lama tetap kompatibel.
+    var initialTradeType: Int = 0
+    /// Kalau true, segmented control Beli/Jual disembunyikan — sheet dikunci ke
+    /// `initialTradeType` (dipakai saat dibuka dari tombol Buy/Jual terpisah di
+    /// StockDetailView yang sudah menentukan aksinya).
+    var lockTradeType: Bool = false
 
     @State private var tradeType      = 0  // 0 = Beli, 1 = Jual
     @State private var useNominal     = true
@@ -511,10 +518,12 @@ struct TradeSheetView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
-                Picker("Tipe Transaksi", selection: $tradeType) {
-                    Text("BELI").tag(0); Text("JUAL").tag(1)
+                if !lockTradeType {
+                    Picker("Tipe Transaksi", selection: $tradeType) {
+                        Text("JUAL").tag(1); Text("BELI").tag(0)
+                    }
+                    .pickerStyle(.segmented).padding(.top, 12)
                 }
-                .pickerStyle(.segmented).padding(.top, 12)
 
                 // Stock info bar
                 HStack(spacing: 12) {
@@ -667,6 +676,7 @@ struct TradeSheetView: View {
             }
             .padding(16)
             .background(Color.DarkPurpleAppBackground.ignoresSafeArea())
+            .onAppear { tradeType = initialTradeType }
             .navigationTitle("Transaksi Simulator")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

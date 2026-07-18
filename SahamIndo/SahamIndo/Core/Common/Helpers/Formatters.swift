@@ -40,6 +40,18 @@ func formatPrice(_ value: Double, market: String) -> String {
     return formatIDR(value, decimals: decimals)
 }
 
+/// Simbol mata uang sesuai market: "Rp" untuk IDX, "$" untuk saham AS
+/// (NASDAQ/NYSE/ETF).
+func currencySymbol(for market: String) -> String {
+    market.uppercased() == "IDX" ? "Rp" : "$"
+}
+
+/// Format harga lengkap dengan prefix mata uang — mis. "Rp9.850" (IDX) atau
+/// "$197,53" (AS).
+func formatPriceWithSymbol(_ value: Double, market: String) -> String {
+    currencySymbol(for: market) + formatPrice(value, market: market)
+}
+
 /// Format harga crypto dengan desimal adaptif — harga crypto rentangnya
 /// ekstrem (BTC puluhan ribu dolar, sebagian coin di bawah $0.0001), jadi
 /// jumlah desimal tetap (kayak formatPrice untuk saham) tidak cocok: kalau

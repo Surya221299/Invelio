@@ -33,6 +33,8 @@ struct StockDetailView: View {
 
     // Sheet state
     @State private var showTradeSheet = false
+    /// Tipe transaksi awal saat sheet dibuka (0 = Beli, 1 = Jual).
+    @State private var initialTradeType = 0
 
     // MARK: - Computed display values (change during drag)
 
@@ -157,6 +159,9 @@ struct StockDetailView: View {
                     )
                     .padding(.horizontal)
 
+                    AnalystRatingsCard(ratings: viewModel.analystRatings)
+                        .padding(.horizontal)
+
                     Spacer(minLength: 20)
                 }
                 .padding(.vertical, 12)
@@ -168,12 +173,13 @@ struct StockDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .sheet(isPresented: $showTradeSheet) {
-            TradeSheetView(stock: viewModel.item)
+            TradeSheetView(stock: viewModel.item, initialTradeType: initialTradeType, lockTradeType: true)
                 .presentationDetents([.large])
                 .environmentObject(portfolioVM)
         }
         .task { await viewModel.fetchChartData() }
         .task { await viewModel.fetchEarningsAndRallyInfo() }
+        .task { await viewModel.fetchAnalystRatings() }
         .onReceive(
             Timer.publish(every: 5 * 60, on: .main, in: .common).autoconnect()
         ) { _ in
@@ -191,29 +197,32 @@ struct StockDetailView: View {
     private var tradeButtonBar: some View {
         VStack(spacing: 0) {
             Divider().background(Color.primary.opacity(0.08))
-            HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Posisi Kepemilikan")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    Text("\(Int(currentQty)) lembar (\(Int(currentQty / 100)) Lot)")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-                }
-                Spacer()
-                Button(action: { showTradeSheet = true }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.left.arrow.right")
-                            .font(.system(size: 15))
-                        Text("Trade")
-                            .font(.system(size: 14, weight: .bold))
+            VStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    // Jual — kiri. Disabled + redup kalau tidak punya saham.
+                    let canSell = currentQty > 0
+                    Button(action: { initialTradeType = 1; showTradeSheet = true }) {
+                        Text("Jual")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color.LossRed)
+                            .cornerRadius(8)
                     }
-                    .foregroundColor(.black)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 11)
-                    .background(Color.PrimaryYellow)
-                    .cornerRadius(8)
-                    .shadow(color: Color.PrimaryYellow.opacity(0.25), radius: 4, x: 0, y: 2)
+                    .disabled(!canSell)
+                    .opacity(canSell ? 1.0 : 0.25)
+
+                    // Buy — kanan.
+                    Button(action: { initialTradeType = 0; showTradeSheet = true }) {
+                        Text("Buy")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color.ProfitGreen)
+                            .cornerRadius(8)
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -287,16 +296,7 @@ struct PriceInfoView: View {
                 }
             }
             Spacer()
-            if isDragging, let point = selectedPoint {
-                VStack(alignment: .trailing, spacing: 3) {
-                    Text(formatDragDate(point.date, range: selectedRange))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
-                    Text(formatPrice(point.close, market: market))
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .transition(.opacity.combined(with: .scale(scale: 0.95)))
-            }
+            // kasi info perusahaan di sini...(next feature)
         }
     }
 
@@ -1577,7 +1577,7 @@ struct RollingPriceView: View {
     let price: Double; let fontSize: CGFloat; var isInteractive: Bool = false
     /// "IDX" | "NASDAQ" | "NYSE" | "ETF" — default "IDX" untuk backward-compat.
     var market: String = "IDX"
-    private var formatted: String { formatPrice(price, market: market) }
+    private var formatted: String { formatPriceWithSymbol(price, market: market) }
     private var tokens: [(id: Int, char: Character)] { Array(formatted.enumerated()).map { ($0.offset, $0.element) } }
 
     var body: some View {
