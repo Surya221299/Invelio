@@ -80,13 +80,35 @@ struct MacroCalendarItem: Identifiable, Equatable {
     let isEstimate: Bool
     /// Penjelasan makna & dampak ke pasar.
     let impact: String
+    /// Angka aktual terkini dari FRED. Nil kalau tidak ada (mis. ISM PMI yang
+    /// datanya proprietary, atau FRED_API_KEY belum di-set di backend).
+    let actual: MacroActual?
 
     static func == (lhs: MacroCalendarItem, rhs: MacroCalendarItem) -> Bool {
         lhs.key == rhs.key && lhs.name == rhs.name
             && lhs.scheduleLabel == rhs.scheduleLabel
             && lhs.nextRelease == rhs.nextRelease
             && lhs.isEstimate == rhs.isEstimate && lhs.impact == rhs.impact
+            && lhs.actual == rhs.actual
     }
+}
+
+// MARK: - MacroActual
+
+/// Angka aktual terkini satu indikator (dari FRED).
+struct MacroActual: Equatable {
+    /// Angka utama siap tampil, mis. "3,1%" atau "+147 rb".
+    let valueText: String
+    /// Keterangan satuan/basis, mis. "YoY", "MoM", "indeks".
+    let unitLabel: String
+    /// Nilai periode sebelumnya siap tampil, mis. "2,9%". Nil kalau tak ada.
+    let previousText: String?
+    /// Arah vs periode sebelumnya (untuk panah): naik/turun/datar.
+    let direction: Direction
+    /// Label periode data, mis. "Jun 2026".
+    let period: String
+
+    enum Direction: String { case up, down, flat }
 }
 
 // MARK: - Placeholder
@@ -107,7 +129,8 @@ extension MacroCalendar {
                             key: "cpi", name: "CPI (Consumer Price Index)",
                             scheduleLabel: "Bulanan · ~tgl 10–15 · 08:30 ET",
                             nextRelease: nil, isEstimate: true,
-                            impact: "Inflasi lebih tinggi dari ekspektasi → Fed hawkish → saham cenderung turun."
+                            impact: "Inflasi lebih tinggi dari ekspektasi → Fed hawkish → saham cenderung turun.",
+                            actual: nil
                         )
                     ]
                 )

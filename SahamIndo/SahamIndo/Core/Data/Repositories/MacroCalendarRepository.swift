@@ -47,6 +47,15 @@ private struct MacroCalendarResponseDTO: Decodable {
         let next_release: String?
         let is_estimate: Bool?
         let impact: String
+        let actual: ActualDTO?
+    }
+
+    struct ActualDTO: Decodable {
+        let value_text: String
+        let unit_label: String?
+        let previous_text: String?
+        let direction: String?
+        let period: String?
     }
 }
 
@@ -83,7 +92,16 @@ final class MacroCalendarRepository: MacroCalendarRepositoryProtocol {
                         scheduleLabel: item.schedule_label ?? "",
                         nextRelease: parseDateTime(item.next_release),
                         isEstimate: item.is_estimate ?? true,
-                        impact: item.impact
+                        impact: item.impact,
+                        actual: item.actual.map {
+                            MacroActual(
+                                valueText: $0.value_text,
+                                unitLabel: $0.unit_label ?? "",
+                                previousText: $0.previous_text,
+                                direction: MacroActual.Direction(rawValue: $0.direction ?? "flat") ?? .flat,
+                                period: $0.period ?? ""
+                            )
+                        }
                     )
                 }
             )

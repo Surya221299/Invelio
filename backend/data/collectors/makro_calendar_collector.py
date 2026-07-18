@@ -14,11 +14,11 @@ APA YANG DIHITUNG:
     - Yield US Treasury 10 tahun LIVE dari Yahoo Finance (ticker ^TNX), termasuk
       perubahan harian. Ini satu-satunya angka "live" di modul ini.
 
-KENAPA TIDAK ADA ANGKA AKTUAL CPI/NFP DI SINI:
-    Angka aktual + konsensus tiap rilis tidak tersedia gratis lengkap. Modul ini
-    fokus pada JADWAL + EDUKASI (kapan rilis, apa artinya, dampak ke pasar) plus
-    yield Treasury live. Untuk menambah angka aktual, integrasikan FRED API
-    (butuh API key gratis) — lihat catatan di collect_makro_calendar().
+ANGKA AKTUAL (FRED):
+    Bila FRED_API_KEY di-set (backend/config.py), tiap indikator diperkaya angka
+    aktual terkini + nilai sebelumnya dari FRED API (mis. CPI YoY, NFP MoM).
+    Konsensus/forecast TIDAK tersedia gratis, jadi tetap tak ditampilkan. ISM PMI
+    & Conference Board tak ada di FRED (proprietary) → hanya jadwal + edukasi.
 
 Penggunaan:
     from backend.data.collectors.makro_calendar_collector import collect_makro_calendar
@@ -31,8 +31,11 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+import httpx
 import yfinance as yf
 from loguru import logger
+
+from backend.config import settings
 
 # Semua rilis makro AS memakai waktu Eastern (ET); DST ditangani oleh zoneinfo.
 ET = ZoneInfo("America/New_York")
@@ -346,6 +349,116 @@ def _build_categories(now: datetime) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Angka aktual via FRED API (opsional — hanya kalau FRED_API_KEY di-set)
+# ---------------------------------------------------------------------------
+#
+# Tiap indikator dipetakan ke satu series FRED + transformasi `units`:
+#   pc1 = persen perubahan dari tahun lalu (YoY)  → CPI/PCE/PPI
+#   pch = persen perubahan dari periode sebelumnya (MoM/QoQ)
+#   chg = perubahan absolut dari periode sebelumnya → NFP (ribu pekerja)
+#   lin = level apa adanya → unemployment, GDP growth, jobless claims, dll
+# `scale` mengubah satuan level (mis. ICSA dalam orang → dibagi 1000 = ribu).
+# ISM PMI & Conference Board TIDAK ada di FRED (data proprietary) → tanpa angka.
+
+_FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
+
+_FRED_SERIES: dict[str, dict[str, Any]] = {
+    "cpi":                {"series": "CPIAUCSL",           "units": "pc1", "dec": 1, "suffix": "%",   "unit_label": "YoY"},
+    "pce":                {"series": "PCEPILFE",           "units": "pc1", "dec": 1, "suffix": "%",   "unit_label": "core YoY"},
+    "ppi":                {"series": "PPIFIS",             "units": "pc1", "dec": 1, "suffix": "%",   "unit_label": "YoY"},
+    "nfp":                {"series": "PAYEMS",             "units": "chg", "dec": 0, "suffix": " rb", "unit_label": "MoM", "sign": True},
+    "jolts":             {"series": "JTSJOL",             "units": "lin", "dec": 1, "suffix": " jt", "unit_label": "lowongan", "scale": 0.001},
+    "jobless_claims":     {"series": "ICSA",               "units": "lin", "dec": 0, "suffix": " rb", "unit_label": "klaim", "scale": 0.001},
+    "gdp":                {"series": "A191RL1Q225SBEA",    "units": "lin", "dec": 1, "suffix": "%",   "unit_label": "QoQ tahunan", "quarterly": True},
+    "retail_sales":       {"series": "RSAFS",              "units": "pch", "dec": 1, "suffix": "%",   "unit_label": "MoM", "sign": True},
+    "michigan_sentiment": {"series": "UMCSENT",            "units": "lin", "dec": 1, "suffix": "",    "unit_label": "indeks"},
+}
+
+_ID_MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
+              "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+
+
+def _fmt_num(value: float, dec: int, suffix: str, sign: bool) -> str:
+    """Format angka gaya Indonesia (koma desimal) + suffix, opsional tanda +."""
+    txt = f"{value:.{dec}f}".replace(".", ",")
+    if sign and value > 0:
+        txt = "+" + txt
+    return txt + suffix
+
+
+def _period_label(iso_date: str, quarterly: bool = False) -> str:
+    """'2026-06-01' → 'Jun 2026' (atau 'Q2 2026' untuk data kuartalan)."""
+    try:
+        d = datetime.strptime(iso_date, "%Y-%m-%d").date()
+        if quarterly:
+            return f"Q{(d.month - 1) // 3 + 1} {d.year}"
+        return f"{_ID_MONTHS[d.month]} {d.year}"
+    except Exception:  # noqa: BLE001
+        return iso_date
+
+
+async def _fetch_fred_one(client: httpx.AsyncClient, key: str,
+                          cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """Ambil 2 observasi terbaru satu series FRED → dict actual siap kirim."""
+    params = {
+        "series_id": cfg["series"],
+        "api_key": settings.fred_api_key,
+        "file_type": "json",
+        "units": cfg["units"],
+        "sort_order": "desc",
+        "limit": 2,
+    }
+    try:
+        resp = await client.get(_FRED_BASE, params=params, timeout=15.0)
+        resp.raise_for_status()
+        obs = [o for o in resp.json().get("observations", []) if o.get("value") not in (None, ".")]
+        if not obs:
+            return None
+
+        scale = cfg.get("scale", 1.0)
+        latest = float(obs[0]["value"]) * scale
+        prev = float(obs[1]["value"]) * scale if len(obs) > 1 else None
+
+        direction = "flat"
+        if prev is not None:
+            direction = "up" if latest > prev else "down" if latest < prev else "flat"
+
+        return {
+            "value_text": _fmt_num(latest, cfg["dec"], cfg["suffix"], cfg.get("sign", False)),
+            "unit_label": cfg["unit_label"],
+            "previous_text": (_fmt_num(prev, cfg["dec"], cfg["suffix"], cfg.get("sign", False))
+                              if prev is not None else None),
+            "direction": direction,
+            "period": _period_label(obs[0].get("date", ""), cfg.get("quarterly", False)),
+            "source": "fred",
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[makro-kalender] gagal fetch FRED {cfg['series']}: {e}")
+        return None
+
+
+async def _fetch_fred_all() -> dict[str, dict[str, Any]]:
+    """Ambil semua series FRED paralel. Kosong kalau FRED_API_KEY tak di-set."""
+    if not settings.fred_api_key:
+        logger.info("[makro-kalender] FRED_API_KEY kosong — angka aktual dilewati.")
+        return {}
+
+    async with httpx.AsyncClient() as client:
+        keys = list(_FRED_SERIES.keys())
+        results = await asyncio.gather(
+            *(_fetch_fred_one(client, k, _FRED_SERIES[k]) for k in keys),
+            return_exceptions=True,
+        )
+
+    out: dict[str, dict[str, Any]] = {}
+    for k, r in zip(keys, results):
+        if isinstance(r, dict):
+            out[k] = r
+    logger.info(f"[makro-kalender] FRED: {len(out)}/{len(keys)} indikator berhasil.")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Yield US Treasury 10 tahun (LIVE via Yahoo Finance ^TNX)
 # ---------------------------------------------------------------------------
 
@@ -378,25 +491,35 @@ def _fetch_treasury_10y() -> dict[str, Any] | None:
 
 async def collect_makro_calendar(force: bool = False) -> dict[str, Any]:
     """
-    Snapshot kalender faktor makro AS: jadwal rilis + edukasi + yield UST 10Y.
-    Selalu mengembalikan dict valid (yield bisa None kalau fetch gagal).
+    Snapshot kalender faktor makro AS: jadwal rilis + edukasi + yield UST 10Y +
+    angka aktual FRED (bila FRED_API_KEY di-set). Selalu mengembalikan dict valid
+    (yield/actual bisa None kalau fetch gagal).
 
-    UNTUK MENAMBAH ANGKA AKTUAL (opsional, butuh FRED API key gratis):
-        Ambil series FRED — CPIAUCSL (CPI), PCEPILFE (core PCE), PPIFIS (PPI),
-        PAYEMS (NFP), UNRATE, ICSA (jobless claims), GDPC1, RSAFS (retail),
-        UMCSENT (Michigan), DGS10 — lalu sisipkan "actual"/"previous" per item.
+    Angka aktual per item ada di `item["actual"]` (None untuk item tanpa series
+    FRED, mis. ISM PMI & Conference Board yang datanya proprietary). Lihat
+    `_FRED_SERIES` untuk pemetaan indikator → series + transformasi.
     """
     now_t = _time.time()
     if not force and "data" in _cache and now_t - _cache.get("ts", 0) < _CACHE_TTL:
         return _cache["data"]
 
     now = _now_et()
-    treasury = await asyncio.to_thread(_fetch_treasury_10y)
+    # Treasury (thread, yfinance sinkron) + FRED (async httpx) paralel.
+    treasury, fred = await asyncio.gather(
+        asyncio.to_thread(_fetch_treasury_10y),
+        _fetch_fred_all(),
+    )
+
+    categories = _build_categories(now)
+    # Sisipkan angka aktual FRED ke tiap item yang punya series.
+    for cat in categories:
+        for item in cat["items"]:
+            item["actual"] = fred.get(item["key"])
 
     data = {
         "as_of": date.today().isoformat(),
         "treasury_10y": treasury,      # bisa None kalau fetch gagal
-        "categories": _build_categories(now),
+        "categories": categories,
     }
     _cache["data"], _cache["ts"] = data, now_t
     return data

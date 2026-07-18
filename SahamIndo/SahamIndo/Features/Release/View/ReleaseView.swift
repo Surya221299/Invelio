@@ -253,6 +253,10 @@ struct MacroIndicatorRow: View {
             }
             .foregroundColor(.secondary)
 
+            if let actual = item.actual {
+                MacroActualBadge(actual: actual)
+            }
+
             Text(item.impact)
                 .font(.caption)
                 .foregroundColor(.secondary.opacity(0.9))
@@ -280,6 +284,58 @@ struct MacroIndicatorRow: View {
         if days == 0 { return "hari ini" }
         if days == 1 { return "besok" }
         return "\(days) hari lagi"
+    }
+}
+
+// MARK: - MacroActualBadge
+
+/// Angka aktual terkini indikator (dari FRED): nilai + panah arah + pembanding.
+struct MacroActualBadge: View {
+
+    let actual: MacroActual
+
+    private var arrow: String {
+        switch actual.direction {
+        case .up:   return "arrow.up.right"
+        case .down: return "arrow.down.right"
+        case .flat: return "minus"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                Text(actual.valueText)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundColor(Color.PrimaryYellow)
+                Image(systemName: arrow)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                if !actual.unitLabel.isEmpty {
+                    Text(actual.unitLabel)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            if let prev = actual.previousText {
+                Text("sebelumnya \(prev)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary.opacity(0.8))
+            }
+
+            Spacer(minLength: 0)
+
+            if !actual.period.isEmpty {
+                Text(actual.period)
+                    .font(.caption2)
+                    .foregroundColor(.secondary.opacity(0.7))
+            }
+        }
+        .padding(.vertical, 5).padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.PrimaryYellow.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
