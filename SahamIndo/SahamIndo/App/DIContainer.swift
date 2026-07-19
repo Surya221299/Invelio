@@ -18,9 +18,12 @@ final class DIContainer {
     lazy var detailRepository: StockDetailRepositoryProtocol  = StockDetailRepository()
     lazy var chartRepository: ChartRepositoryProtocol         = ChartRepository()
     lazy var insightRepository: InsightRepositoryProtocol     = InsightRepository()
+    lazy var fedWatchRepository: FedWatchRepositoryProtocol    = FedWatchRepository()
+    lazy var macroCalendarRepository: MacroCalendarRepositoryProtocol = MacroCalendarRepository()
     lazy var chatRepository: ChatRepositoryProtocol           = ChatRepository()
     lazy var alertRepository: AlertRepositoryProtocol         = AlertRepository()
     lazy var portfolioRepository: PortfolioRepositoryProtocol = UserDefaultsPortfolioRepository()
+    lazy var portfolioHealthRepository: PortfolioHealthRepositoryProtocol = PortfolioHealthRepository()
 
     /// Repository untuk search universe simbol + analyze on-demand.
     /// Lazy singleton — tidak butuh lebih dari satu instance.
@@ -55,7 +58,8 @@ final class DIContainer {
             buyUseCase:          makeBuyUseCase(),
             sellUseCase:         makeSellUseCase(),
             portfolioRepository: portfolioRepository,
-            fetchChartUseCase:   makeFetchChartDataUseCase()
+            fetchChartUseCase:   makeFetchChartDataUseCase(),
+            healthRepository:    portfolioHealthRepository
         )
     }
 
@@ -69,6 +73,13 @@ final class DIContainer {
 
     func makeChatViewModel() -> ChatViewModel {
         ChatViewModel(chatRepository: chatRepository)
+    }
+
+    func makeReleaseViewModel() -> ReleaseViewModel {
+        ReleaseViewModel(
+            fedWatchRepository: fedWatchRepository,
+            macroCalendarRepository: macroCalendarRepository
+        )
     }
 
     func makeNotificationViewModel() -> NotificationViewModel {

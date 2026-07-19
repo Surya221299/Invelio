@@ -86,6 +86,7 @@ from backend.db.postgres import (
     Fundamental,
     Saham,
     ScoringMingguan,
+    SimbolReferensi,
     async_session,
 )
 from backend.rag.retriever import retrieve, retrieve_multi_saham
@@ -383,6 +384,43 @@ def _butuh_live_search(pertanyaan: str, jumlah_dokumen_chromadb: int) -> bool:
     return ada_freshness_keyword or jumlah_dokumen_chromadb == 0
 
 
+async def _lookup_market_saham(kode_list: list[str]) -> dict[str, str]:
+    """
+    Ambil market ("IDX"/"NASDAQ"/"NYSE"/...) untuk daftar kode saham.
+
+    Dicari dulu di tabel watchlist (Saham), lalu fallback ke universe
+    pencarian (SimbolReferensi). Kode yang tidak ketemu di mana pun
+    default ke "IDX" (perilaku lama). Tidak pernah raise — kalau DB error,
+    kembalikan map kosong supaya live search tetap jalan (default IDX).
+    """
+    kode_upper = [k.strip().upper() for k in kode_list]
+    result: dict[str, str] = {}
+    if not kode_upper:
+        return result
+    try:
+        async with async_session() as session:
+            rows = await session.execute(
+                select(Saham.kode, Saham.market).where(Saham.kode.in_(kode_upper))
+            )
+            for kode, market in rows.all():
+                if market:
+                    result[kode.strip().upper()] = market
+
+            sisa = [k for k in kode_upper if k not in result]
+            if sisa:
+                rows2 = await session.execute(
+                    select(SimbolReferensi.kode, SimbolReferensi.market).where(
+                        SimbolReferensi.kode.in_(sisa)
+                    )
+                )
+                for kode, market in rows2.all():
+                    if market:
+                        result[kode.strip().upper()] = market
+    except Exception as e:
+        logger.warning(f"⚠️ Gagal lookup market saham untuk live search: {e}")
+    return result
+
+
 async def _live_web_search_untuk_pertanyaan(
     pertanyaan: str,
     saham_list: list[str],
@@ -400,12 +438,22 @@ async def _live_web_search_untuk_pertanyaan(
 
     try:
         if saham_list:
+            # Cari tahu market tiap saham supaya berita saham US diambil dari
+            # Google News locale US (bahasa Inggris), bukan Indonesia.
+            market_map = await _lookup_market_saham(saham_list[:2])
             for kode in saham_list[:2]:  # batasi max 2 saham biar tidak terlalu lama
+                market = market_map.get(kode.strip().upper(), "IDX")
+                from backend.data.collectors.berita_collector import _news_locale
+                if _news_locale(market) == "US":
+                    query = f"{kode} stock latest news"
+                else:
+                    query = f"{kode} saham berita terbaru"
                 artikel = await live_search_berita(
-                    query=f"{kode} saham berita terbaru",
+                    query=query,
                     kode_saham=kode,
                     hari_terakhir=3,
                     max_hasil=3,
+                    market=market,
                 )
                 semua_hasil.extend(artikel)
         else:

@@ -11,29 +11,42 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.postgres import get_db_session, ScoringMingguan, Saham
+from backend.db.postgres import get_db_session, ScoringMingguan, Saham, Fundamental
 from backend.config import settings
 from backend.api.routes.data import get_single_stock_price_stats
+from backend.utils.text import strip_alasan_noise
+from backend.utils.explain import penjelasan_dari_scoring
+
+
+async def _fundamental_terbaru_per_kode(
+    db: AsyncSession, kode_list: list[str]
+) -> dict[str, Fundamental]:
+    """
+    Ambil baris Fundamental TERBARU untuk tiap kode dalam satu query.
+
+    Dipakai untuk memperkaya penjelasan skor (deskripsi ROE/PBV/DER/PE).
+    Kalau sebuah kode tidak punya data fundamental, ia cukup absen dari
+    hasil (penjelasan tetap jalan, hanya tanpa detail rasio).
+    """
+    if not kode_list:
+        return {}
+    stmt = (
+        select(Fundamental)
+        .where(Fundamental.kode_saham.in_(kode_list))
+        .order_by(Fundamental.tanggal.desc())
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    terbaru: dict[str, Fundamental] = {}
+    for f in rows:  # sudah terurut tanggal desc → yang pertama = terbaru
+        terbaru.setdefault(f.kode_saham, f)
+    return terbaru
 
 def clean_alasan_text(text: str) -> str:
     if not text:
         return ""
     import re
-    lines = text.split("\n")
-    cleaned_lines = []
-    for line in lines:
-        line_stripped = line.strip()
-        if not line_stripped:
-            continue
-        # Hapus header bracket seperti [RISIKO], [RECOMMENDASI], [ANALISIS], [REKOMENDASI]
-        if line_stripped.startswith("[") and line_stripped.endswith("]"):
-            continue
-        # Hapus baris yang hanya berisi kata rekomendasi
-        if line_stripped.upper() in ["RECOMMENDED", "NEUTRAL", "NEGATIVE", "RECOMMENDATION", "REKOMENDASI", "BUY", "SELL", "HOLD"]:
-            continue
-        cleaned_lines.append(line_stripped)
     # Join dengan spasi agar menjadi satu paragraf mengalir
-    joined = " ".join(cleaned_lines).strip()
+    joined = " ".join(strip_alasan_noise(text)).strip()
     # Hapus catatan berita kurang secara dinamis
     joined = re.sub(r'⚠️\s*Catatan:\s*berita kurang[^\.]*\.?', '', joined)
     joined = re.sub(r'⚠️\s*Catatan:[^\.]*\.?', '', joined)
@@ -86,6 +99,11 @@ async def get_rekomendasi_mingguan(
         result = await db.execute(stmt)
         rows = result.all()
 
+        # Ambil fundamental terbaru untuk semua kode sekaligus (untuk penjelasan)
+        fundamental_map = await _fundamental_terbaru_per_kode(
+            db, [r[0].kode_saham for r in rows]
+        )
+
         rekomendasi_list = []
         for i, row in enumerate(rows, 1):
             scoring_obj, nama_pt, sektor = row
@@ -103,6 +121,10 @@ async def get_rekomendasi_mingguan(
                 "rekomendasi": scoring_obj.rekomendasi.value,
                 "confidence": scoring_obj.confidence,
                 "alasan": clean_alasan_text(scoring_obj.alasan),
+                # Penjelasan terstruktur & deterministik ("kenapa skor ini?")
+                "penjelasan": penjelasan_dari_scoring(
+                    scoring_obj, fundamental_map.get(scoring_obj.kode_saham)
+                ),
             })
 
         return {
@@ -157,6 +179,12 @@ async def get_rekomendasi_saham(
         # Ambil harga dan perubahan harga
         price, change, pct_change = await get_single_stock_price_stats(kode_upper, db, saham_obj.market)
 
+        # Fundamental terbaru untuk memperkaya penjelasan skor
+        fundamental_map = await _fundamental_terbaru_per_kode(db, [kode_upper])
+        penjelasan = penjelasan_dari_scoring(
+            scoring_obj, fundamental_map.get(kode_upper), market=saham_obj.market or "IDX"
+        )
+
         return {
             "kode_saham": scoring_obj.kode_saham,
             "nama_perusahaan": saham_obj.nama_perusahaan,
@@ -179,6 +207,7 @@ async def get_rekomendasi_saham(
             "rekomendasi": scoring_obj.rekomendasi.value,
             "confidence": scoring_obj.confidence,
             "alasan": clean_alasan_text(scoring_obj.alasan),
+            "penjelasan": penjelasan,
             "data_terbatas": scoring_obj.confidence < 0.4,
             "catatan_data": "Data fundamental atau berita pendukung kurang lengkap di database." if scoring_obj.confidence < 0.4 else "",
             "price": price,

@@ -45,6 +45,11 @@ struct PortfolioView: View {
                     onTrade:   { selectedStockForTrade = $0 }
                 )
 
+                if let health = vm.health {
+                    PortfolioDailyCard(health: health, isLoading: vm.isAnalyzingHealth)
+                    PortfolioHealthCard(health: health)
+                }
+
                 AIRecommendationsSectionView(
                     recommendations: aiRecommendations,
                     onTapItem:       { router.push(.stockDetail($0)) }
@@ -63,7 +68,7 @@ struct PortfolioView: View {
                 .presentationDetents([.large])
                 .environmentObject(vm)
         }
-        .task { await vm.fetchData() }
+        .task { await vm.fetchData(); await vm.analyzeHealth() }
     }
 
     // MARK: - Top Bar
@@ -142,7 +147,16 @@ struct PortfolioSummaryCardView: View {
                 Text("Total Assets")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                PortfolioValueAnimator()
+                // Saat men-scrub chart, tampilkan nilai portofolio pada titik yang
+                // dipilih (mengikuti crosshair). Di luar drag, kembalikan ke
+                // animator live (roll/flash dari nilai server).
+                if isDragging {
+                    Text(formatIDR(displayedValue))
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .foregroundColor(.primary)
+                } else {
+                    PortfolioValueAnimator()
+                }
                 let isPos = displayedGrowthPercent >= 0
                 HStack(spacing: 8) {
                     Text(isPos ? "+\(formatIDR(displayedProfitIDR))" : formatIDR(displayedProfitIDR))
@@ -200,7 +214,8 @@ struct PortfolioChartSectionView: View {
                 accentColor:       orange,
                 displayIsPositive: true,
                 fixedColor:        orange,
-                revealOnFirstLoad: true
+                revealOnFirstLoad: true,
+                useHighPriorityDrag: true
             )
             .frame(height: 180)
             .background(
@@ -431,6 +446,13 @@ struct TradeSheetView: View {
     @EnvironmentObject private var vm: PortfolioViewModel
 
     let stock: PortfolioItem
+    /// Tipe transaksi awal saat sheet dibuka (0 = Beli, 1 = Jual).
+    /// Default 0 supaya call-site lama tetap kompatibel.
+    var initialTradeType: Int = 0
+    /// Kalau true, segmented control Beli/Jual disembunyikan — sheet dikunci ke
+    /// `initialTradeType` (dipakai saat dibuka dari tombol Buy/Jual terpisah di
+    /// StockDetailView yang sudah menentukan aksinya).
+    var lockTradeType: Bool = false
 
     @State private var tradeType      = 0  // 0 = Beli, 1 = Jual
     @State private var useNominal     = true
@@ -472,7 +494,7 @@ struct TradeSheetView: View {
     }
     private var calculatedShares: Double { calculatedLots * 100.0 }
     private var subtotal:         Double { calculatedShares * price }
-    private var transactionFee:   Double { subtotal * (tradeType == 0 ? 0.0020 : 0.0030) }
+    private var transactionFee:   Double { subtotal * (tradeType == 0 ? 0.0 : 0.0030) }
     private var estTotal:         Double { tradeType == 0 ? subtotal + transactionFee : subtotal - transactionFee }
     private var ownedQty:         Double { vm.holdings.first { $0.symbol == stock.symbol }?.quantity ?? 0 }
 
@@ -496,10 +518,12 @@ struct TradeSheetView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
-                Picker("Tipe Transaksi", selection: $tradeType) {
-                    Text("BELI").tag(0); Text("JUAL").tag(1)
+                if !lockTradeType {
+                    Picker("Tipe Transaksi", selection: $tradeType) {
+                        Text("JUAL").tag(1); Text("BELI").tag(0)
+                    }
+                    .pickerStyle(.segmented).padding(.top, 12)
                 }
-                .pickerStyle(.segmented).padding(.top, 12)
 
                 // Stock info bar
                 HStack(spacing: 12) {
@@ -652,6 +676,7 @@ struct TradeSheetView: View {
             }
             .padding(16)
             .background(Color.DarkPurpleAppBackground.ignoresSafeArea())
+            .onAppear { tradeType = initialTradeType }
             .navigationTitle("Transaksi Simulator")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

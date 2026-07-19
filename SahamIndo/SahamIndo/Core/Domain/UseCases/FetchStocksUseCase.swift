@@ -80,7 +80,7 @@ final class FetchChartDataUseCase {
     private let repo: ChartRepositoryProtocol
     init(repo: ChartRepositoryProtocol) { self.repo = repo }
 
-    func execute(symbol: String, range: TimeRange) async -> (dataPoints: [StockDataPoint], cacheState: CacheState) {
-        await repo.fetchCandles(symbol: symbol, range: range)
+    func execute(symbol: String, range: TimeRange, market: String? = nil) async -> (dataPoints: [StockDataPoint], cacheState: CacheState) {
+        await repo.fetchCandles(symbol: symbol, range: range, market: market)
     }
 }

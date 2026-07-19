@@ -77,6 +77,41 @@ struct RallyStreakDTO: Decodable {
     let is_rally_streak: Bool
 }
 
+struct AnalystRatingsDTO: Decodable {
+    let kode_saham:   String
+    let consensus:    ConsensusDTO?
+    let distribution: DistributionDTO?
+    let history:      [RowDTO]
+    let sumber:       String?
+
+    struct ConsensusDTO: Decodable {
+        let current: Double?
+        let low:     Double?
+        let high:    Double?
+        let mean:    Double?
+        let median:  Double?
+    }
+
+    struct DistributionDTO: Decodable {
+        let strong_buy:  Int
+        let buy:         Int
+        let hold:        Int
+        let sell:        Int
+        let strong_sell: Int
+    }
+
+    struct RowDTO: Decodable {
+        let date:                String?
+        let firm:                String
+        let to_grade:            String
+        let from_grade:          String
+        let action:              String
+        let price_target_action: String
+        let current_pt:          Double?
+        let prior_pt:            Double?
+    }
+}
+
 struct MakroIndicatorDTO: Decodable {
     let nilai:    Double
     let satuan:   String

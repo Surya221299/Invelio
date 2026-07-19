@@ -30,6 +30,12 @@ struct MainTabView: View {
                 value: "search") {
                 SearchNavigationView()
             }
+            /// Tab baru: Release — probabilitas CME FedWatch (suku bunga Fed)
+            Tab("Release",
+                systemImage: router.selectedTab == "release" ? "calendar.badge.clock" : "calendar",
+                value: "release") {
+                ReleaseView()
+            }
             Tab("Chatbot",
                 systemImage: "sparkles.square.filled.on.square",
                 value: "chatbot") {

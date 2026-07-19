@@ -33,6 +33,8 @@ struct StockDetailView: View {
 
     // Sheet state
     @State private var showTradeSheet = false
+    /// Tipe transaksi awal saat sheet dibuka (0 = Beli, 1 = Jual).
+    @State private var initialTradeType = 0
 
     // MARK: - Computed display values (change during drag)
 
@@ -98,13 +100,16 @@ struct StockDetailView: View {
 
                     // Badge pre-market/after-hours — cuma muncul untuk NASDAQ/NYSE/ETF
                     // dan cuma kalau memang sedang dalam sesi itu saat ini.
-                    if !isDragging {
-                        HStack {
-                            ExtendedHoursBadgeView(data: extendedHours, style: .full)
-                            Spacer()
-                        }
-                        .padding(.horizontal)
+                    // Saat drag, badge cuma di-FADE (opacity 0), BUKAN dihapus dari
+                    // tree — kalau dihapus, tinggi + spacing VStack hilang sehingga
+                    // chart & view di bawahnya ikut melompat ke atas.
+                    HStack {
+                        ExtendedHoursBadgeView(data: extendedHours, style: .full)
+                        Spacer()
                     }
+                    .padding(.horizontal)
+                    .opacity(isDragging ? 0 : 1)
+                    .animation(.easeInOut(duration: 0.1), value: isDragging)
 
                     ChartCanvasView(
                         chartVM:           viewModel,
@@ -113,7 +118,8 @@ struct StockDetailView: View {
                         chartSize:         $chartSize,
                         accentColor:       accentColor,
                         displayIsPositive: displayIsPositive,
-                        market:            market
+                        market:            market,
+                        analystTargets:    viewModel.analystRatings?.history ?? []
                     )
                     .frame(height: 230)
                     .background(
@@ -154,6 +160,9 @@ struct StockDetailView: View {
                     )
                     .padding(.horizontal)
 
+                    AnalystRatingsCard(ratings: viewModel.analystRatings)
+                        .padding(.horizontal)
+
                     Spacer(minLength: 20)
                 }
                 .padding(.vertical, 12)
@@ -165,12 +174,13 @@ struct StockDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .sheet(isPresented: $showTradeSheet) {
-            TradeSheetView(stock: viewModel.item)
+            TradeSheetView(stock: viewModel.item, initialTradeType: initialTradeType, lockTradeType: true)
                 .presentationDetents([.large])
                 .environmentObject(portfolioVM)
         }
         .task { await viewModel.fetchChartData() }
         .task { await viewModel.fetchEarningsAndRallyInfo() }
+        .task { await viewModel.fetchAnalystRatings() }
         .onReceive(
             Timer.publish(every: 5 * 60, on: .main, in: .common).autoconnect()
         ) { _ in
@@ -188,29 +198,32 @@ struct StockDetailView: View {
     private var tradeButtonBar: some View {
         VStack(spacing: 0) {
             Divider().background(Color.primary.opacity(0.08))
-            HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Posisi Kepemilikan")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    Text("\(Int(currentQty)) lembar (\(Int(currentQty / 100)) Lot)")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
-                }
-                Spacer()
-                Button(action: { showTradeSheet = true }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.left.arrow.right")
-                            .font(.system(size: 15))
-                        Text("Trade")
-                            .font(.system(size: 14, weight: .bold))
+            VStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    // Jual — kiri. Disabled + redup kalau tidak punya saham.
+                    let canSell = currentQty > 0
+                    Button(action: { initialTradeType = 1; showTradeSheet = true }) {
+                        Text("Jual")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color.LossRed)
+                            .cornerRadius(8)
                     }
-                    .foregroundColor(.black)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 11)
-                    .background(Color.PrimaryYellow)
-                    .cornerRadius(8)
-                    .shadow(color: Color.PrimaryYellow.opacity(0.25), radius: 4, x: 0, y: 2)
+                    .disabled(!canSell)
+                    .opacity(canSell ? 1.0 : 0.25)
+
+                    // Buy — kanan.
+                    Button(action: { initialTradeType = 0; showTradeSheet = true }) {
+                        Text("Buy")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color.ProfitGreen)
+                            .cornerRadius(8)
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -284,16 +297,7 @@ struct PriceInfoView: View {
                 }
             }
             Spacer()
-            if isDragging, let point = selectedPoint {
-                VStack(alignment: .trailing, spacing: 3) {
-                    Text(formatDragDate(point.date, range: selectedRange))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
-                    Text(formatPrice(point.close, market: market))
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .transition(.opacity.combined(with: .scale(scale: 0.95)))
-            }
+            // kasi info perusahaan di sini...(next feature)
         }
     }
 
@@ -407,10 +411,30 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
     /// Default "IDX" supaya PortfolioHistoryChart (nilai portofolio, selalu
     /// Rupiah) tidak perlu diubah.
     var market: String = "IDX"
+    /// Attach the scrub gesture as `.highPriorityGesture` instead of `.gesture`.
+    /// Needed when the chart lives inside a clipped card nested in a vertical
+    /// ScrollView (Portfolio card di HomeView) — di situ ScrollView memenangkan
+    /// pan gesture sehingga crosshair tidak pernah aktif. StockDetail (chart
+    /// langsung anak ScrollView) tetap pakai `.gesture` default.
+    var useHighPriorityDrag: Bool = false
+
+    /// Riwayat price target dari analis. Ditampilkan sebagai titik kuning yang
+    /// bisa ditekan, diposisikan di sumbu-X sesuai tanggal rating & sumbu-Y
+    /// sesuai nilai target. Hanya baris dengan tanggal DI DALAM rentang data
+    /// yang tampil sekarang (`dataPoints.first…last`) dan target > 0 yang
+    /// digambar. Default kosong → chart lain (Portfolio) tidak terpengaruh.
+    var analystTargets: [AnalystRatingRow] = []
+
+    /// Kunci tanggal marker analis yang sedang dipilih (callout terbuka). Reset
+    /// saat scrub garis harga atau ganti rentang waktu.
+    @State private var selectedAnalystDate: String? = nil
 
     @State private var animatedData:        AnimatableChartData = .zero
     @State private var oneDayReady:         Bool    = false
     @State private var oneDayClipWidth:     CGFloat = 0
+    /// `true` setelah animasi reveal 1D (clip kiri→kanan) selesai. Selama masih
+    /// `false`, dot aktif merambat mengikuti ujung garis (bukan diam di kanan).
+    @State private var oneDayRevealDone:    Bool    = false
     @State private var hasEverLoadedOneDay: Bool    = false
     @State private var pulseScale:          CGFloat = 1.0
     /// Non-1D first-load reveal: clip slides left→right once, then stays full width.
@@ -454,29 +478,15 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
             // Simple window: 20:00–05:30 WIB (generous to cover both DST cases)
             return nowMins >= 20 * 60 || nowMins <= 5 * 60 + 30
         } else {
-            // IDX: 09:00–16:00 WIB (with midday break, but we animate the whole session)
-            return nowMins >= 9 * 60 && nowMins < 16 * 60
+            // IDX: hanya "aktif" saat sesi benar-benar berjalan — buka, belum
+            // tutup, DAN bukan jam istirahat siang. Selama istirahat pulse dot
+            // berhenti karena tidak ada perdagangan.
+            return IDXTradingCalendar.isSessionOpen(now)
         }
     }
 
     var body: some View {
-        ZStack {
-            let shouldShow = chartSize.height > 0 &&
-                (oneDayReady || !animatedData.points.isEmpty)
-
-            if shouldShow {
-                chartContent
-            } else if chartVM.dataPoints.isEmpty && !chartVM.isLoading {
-                Text("Data tidak tersedia")
-                    .font(.caption).foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.appCardBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .contentShape(Rectangle().inset(by: -40))
-        .gesture(dragGesture)
+        interactiveChart
         .onChange(of: chartVM.isLoading) { _, isLoading in
             guard !isLoading else { return }
             applyChartData()
@@ -497,7 +507,45 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
             updatePulse()
         }
         .onAppear { updatePulse() }
-        .onChange(of: chartVM.selectedRange) { _, _ in updatePulse() }
+        .onChange(of: chartVM.selectedRange) { _, _ in
+            updatePulse()
+            selectedAnalystDate = nil
+        }
+    }
+
+    /// Scrub gesture di-attach sebagai high-priority hanya bila diminta (Portfolio
+    /// card di dalam ScrollView). `useHighPriorityDrag` konstan per call-site,
+    /// jadi cabang ini stabil dan tidak memicu reset identity SwiftUI.
+    @ViewBuilder
+    private var interactiveChart: some View {
+        if useHighPriorityDrag {
+            coreChart.highPriorityGesture(dragGesture)
+        } else {
+            coreChart.gesture(dragGesture)
+        }
+    }
+
+    private var coreChart: some View {
+        ZStack {
+            let shouldShow = chartSize.height > 0 &&
+                (oneDayReady || !animatedData.points.isEmpty)
+
+            if shouldShow {
+                chartContent
+            } else if chartVM.dataPoints.isEmpty && !chartVM.isLoading {
+                Text("Data tidak tersedia")
+                    .font(.caption).foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.appCardBackground))
+        // Catatan: clip rounded TIDAK dipasang di sini lagi — kalau seluruh ZStack
+        // di-clip, dot harga terakhir / pulse ring di tepi kanan (x ≈ width-4)
+        // ikut ter-crop. Clip rounded sekarang hanya membungkus grafik area/line
+        // di dalam `chartContent`, sedangkan dot & crosshair digambar sebagai
+        // overlay tanpa clip. Lihat chartContent.
+        .contentShape(Rectangle().inset(by: -40))
     }
 
     // MARK: - Pulse Animation
@@ -538,8 +586,12 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                 hasEverLoadedOneDay = true
                 oneDayReady         = true
                 oneDayClipWidth     = 0
+                oneDayRevealDone    = false
                 DispatchQueue.main.async {
                     withAnimation(.easeInOut(duration: 1.2)) { oneDayClipWidth = targetClip }
+                    // Setelah reveal selesai, dot pindah ke mode "ikuti data terakhir"
+                    // (agar update streaming live tetap menggerakkan dot).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.25) { oneDayRevealDone = true }
                 }
             } else {
                 oneDayReady = false
@@ -608,90 +660,77 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
         }() : []
 
         ZStack {
-            DashLine(from: CGPoint(x: 0, y: yMax), to: CGPoint(x: chartSize.width, y: yMax))
-                .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            DashLine(from: CGPoint(x: 0, y: yMin), to: CGPoint(x: chartSize.width, y: yMin))
-                .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            AnimatableHDashLine(y: yBaseline)
-                .stroke(Color.AccentGold.opacity(0.50),
-                        style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
-                .animation(.spring(response: 1.55, dampingFraction: 1.0), value: yBaseline)
+            // ==== Grafik chart — DI-CLIP rounded (sudut kartu membulat) ====
+            // Hanya area/line/dash yang di-clip. Dot & crosshair digambar sebagai
+            // overlay di luar clip ini supaya tidak ter-crop di tepi kanan.
+            ZStack {
+                DashLine(from: CGPoint(x: 0, y: yMax), to: CGPoint(x: chartSize.width, y: yMax))
+                    .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                DashLine(from: CGPoint(x: 0, y: yMin), to: CGPoint(x: chartSize.width, y: yMin))
+                    .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                AnimatableHDashLine(y: yBaseline)
+                    .stroke(Color.AccentGold.opacity(0.50),
+                            style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
+                    .animation(.spring(response: 1.55, dampingFraction: 1.0), value: yBaseline)
 
-            if isOneDay {
-                let lastSlotIdx = data.isEmpty ? 0 : chartVM.oneDaySlotIndex(for: data.last!.date)
-                let innerW      = chartSize.width - 8
-                let dotX        = 4 + CGFloat(lastSlotIdx) / CGFloat(chartVM.oneDayTotalSlots - 1) * innerW
-                let dotColor    = lastP >= startP ? greenColor : redColor
-
-                ZStack {
-                    OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
-                                    hPad: 4, closingY: yBaseline)
-                        .fill(LinearGradient(stops: [
-                            .init(color: greenColor.opacity(0.38), location: 0.0),
-                            .init(color: greenColor.opacity(0.18), location: 0.5),
-                            .init(color: greenColor.opacity(0.0),  location: 1.0)],
-                            startPoint: .top, endPoint: .bottom))
-                        .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
-                    OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
-                                    hPad: 4, closingY: yBaseline)
-                        .fill(LinearGradient(stops: [
-                            .init(color: redColor.opacity(0.38), location: 0.0),
-                            .init(color: redColor.opacity(0.18), location: 0.5),
-                            .init(color: redColor.opacity(0.0),  location: 1.0)],
-                            startPoint: .bottom, endPoint: .top))
-                        .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
-                            width: chartSize.width, height: chartSize.height - yBaseline)))
-                    OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
-                        .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                        .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
-                    OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
-                        .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                        .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
-                            width: chartSize.width, height: chartSize.height - yBaseline)))
-                    if !isDragging {
-                        AnimatableHDashLine(y: yLast)
-                            .stroke(dotColor.opacity(0.70), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
-                        // Pulse ring — only when market is active
-                        if isMarketActive {
-                            Circle()
-                                .fill(dotColor.opacity(0.25))
-                                .frame(width: 9 * pulseScale, height: 9 * pulseScale)
-                                .position(x: dotX, y: yLast)
-                        }
-                        Circle().fill(dotColor).frame(width: 9, height: 9)
-                            .shadow(color: dotColor.opacity(0.7), radius: 5)
-                            .position(x: dotX, y: yLast)
-                        Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
-                            .position(x: dotX, y: yLast)
+                if isOneDay {
+                    ZStack {
+                        OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
+                                        hPad: 4, closingY: yBaseline)
+                            .fill(LinearGradient(stops: [
+                                .init(color: greenColor.opacity(0.38), location: 0.0),
+                                .init(color: greenColor.opacity(0.18), location: 0.5),
+                                .init(color: greenColor.opacity(0.0),  location: 1.0)],
+                                startPoint: .top, endPoint: .bottom))
+                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
+                        OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
+                                        hPad: 4, closingY: yBaseline)
+                            .fill(LinearGradient(stops: [
+                                .init(color: redColor.opacity(0.38), location: 0.0),
+                                .init(color: redColor.opacity(0.18), location: 0.5),
+                                .init(color: redColor.opacity(0.0),  location: 1.0)],
+                                startPoint: .bottom, endPoint: .top))
+                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
+                                width: chartSize.width, height: chartSize.height - yBaseline)))
+                        OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
+                            .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
+                        OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
+                            .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
+                                width: chartSize.width, height: chartSize.height - yBaseline)))
                     }
-                }
-                .clipShape(AnimatableClipRect(clipWidth: oneDayClipWidth))
+                    .clipShape(AnimatableClipRect(clipWidth: oneDayClipWidth))
 
-            } else {
-                ZStack {
-                    MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
-                        .fill(LinearGradient(stops: [
-                            .init(color: greenColor.opacity(0.38), location: 0.0),
-                            .init(color: greenColor.opacity(0.18), location: 0.5),
-                            .init(color: greenColor.opacity(0.0),  location: 1.0)],
-                            startPoint: .top, endPoint: .bottom))
-                        .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
-                    MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
-                        .fill(LinearGradient(stops: [
-                            .init(color: redColor.opacity(0.38), location: 0.0),
-                            .init(color: redColor.opacity(0.18), location: 0.5),
-                            .init(color: redColor.opacity(0.0),  location: 1.0)],
-                            startPoint: .bottom, endPoint: .top))
-                        .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
-                    MorphingXYLineShape(data: animatedData)
-                        .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                        .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
-                    MorphingXYLineShape(data: animatedData)
-                        .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                        .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
+                } else {
+                    ZStack {
+                        MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
+                            .fill(LinearGradient(stops: [
+                                .init(color: greenColor.opacity(0.38), location: 0.0),
+                                .init(color: greenColor.opacity(0.18), location: 0.5),
+                                .init(color: greenColor.opacity(0.0),  location: 1.0)],
+                                startPoint: .top, endPoint: .bottom))
+                            .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
+                        MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
+                            .fill(LinearGradient(stops: [
+                                .init(color: redColor.opacity(0.38), location: 0.0),
+                                .init(color: redColor.opacity(0.18), location: 0.5),
+                                .init(color: redColor.opacity(0.0),  location: 1.0)],
+                                startPoint: .bottom, endPoint: .top))
+                            .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
+                        MorphingXYLineShape(data: animatedData)
+                            .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                            .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
+                        MorphingXYLineShape(data: animatedData)
+                            .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                            .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
+                    }
+                    .clipShape(AnimatableClipRect(clipWidth: (!revealOnFirstLoad || hasRevealed) ? chartSize.width : revealClipWidth))
                 }
-                .clipShape(AnimatableClipRect(clipWidth: (!revealOnFirstLoad || hasRevealed) ? chartSize.width : revealClipWidth))
             }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            // ==== Overlay — TIDAK di-clip (dot & shadow bebas di tepi) ====
 
             // Max / Min labels
             Text("Max \(formatPrice(maxP, market: market))")
@@ -705,20 +744,83 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                 .background(Color.appCardBackground.opacity(0.85)).cornerRadius(4)
                 .position(x: chartSize.width - 34, y: yMin + 10)
 
+            // Active price dot & dashed line — 1D (pulse saat market aktif)
+            if isOneDay && !isDragging {
+                let innerW   = chartSize.width - 8
+                let dotColor = lastP >= startP ? greenColor : redColor
+
+                if !oneDayRevealDone && data.count > 1 {
+                    // Reveal pertama: garis 1D tumbuh kiri→kanan via oneDayClipWidth.
+                    // Dot ikut merambat di ujung garis (tipX = oneDayClipWidth),
+                    // bukan langsung menempel di posisi terakhir. Titik polyline
+                    // dihitung identik dengan OneDayLineShape (hPad 4) & yPos.
+                    let tipPoints: [CGPoint] = data.map { pt in
+                        let slot = chartVM.oneDaySlotIndex(for: pt.date)
+                        return CGPoint(
+                            x: 4 + CGFloat(slot) / CGFloat(chartVM.oneDayTotalSlots - 1) * innerW,
+                            y: yPos(for: pt.close, in: chartSize)
+                        )
+                    }
+                    ZStack {
+                        Circle().fill(dotColor).frame(width: 9, height: 9)
+                            .shadow(color: dotColor.opacity(0.7), radius: 5)
+                        Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
+                    }
+                    .frame(width: 9, height: 9)
+                    .position(x: 0, y: 0)
+                    .modifier(GrowingLineTip(tipX: oneDayClipWidth, points: tipPoints))
+                } else {
+                    // Settled: dot menempel di data terakhir (mengikuti update live).
+                    let lastSlotIdx = data.isEmpty ? 0 : chartVM.oneDaySlotIndex(for: data.last!.date)
+                    let dotX        = 4 + CGFloat(lastSlotIdx) / CGFloat(chartVM.oneDayTotalSlots - 1) * innerW
+
+                    AnimatableHDashLine(y: yLast)
+                        .stroke(dotColor.opacity(0.70), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                    if isMarketActive {
+                        Circle()
+                            .fill(dotColor.opacity(0.25))
+                            .frame(width: 9 * pulseScale, height: 9 * pulseScale)
+                            .position(x: dotX, y: yLast)
+                    }
+                    Circle().fill(dotColor).frame(width: 9, height: 9)
+                        .shadow(color: dotColor.opacity(0.7), radius: 5)
+                        .position(x: dotX, y: yLast)
+                    Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
+                        .position(x: dotX, y: yLast)
+                }
+            }
+
             // Last price dot & dashed line (non-1D)
             if !isDragging && !isOneDay {
-                let dotColor = lastP >= startP ? greenColor : redColor
-                let animX = animatedData.points.last.map { $0.x } ?? xFor(index: data.count - 1, count: data.count, width: chartSize.width)
-                let animY = animatedData.points.last.map { $0.y } ?? yLast
+                let dotColor  = lastP >= startP ? greenColor : redColor
+                let tipPoints = animatedData.points.map { CGPoint(x: $0.x, y: $0.y) }
 
-                AnimatableHDashLine(y: animY)
-                    .stroke(dotColor.opacity(0.70), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
-                    .animation(.spring(response: 1.55, dampingFraction: 1.0), value: animY)
-                Circle().fill(dotColor).frame(width: 9, height: 9)
-                    .shadow(color: dotColor.opacity(0.7), radius: 5)
-                    .position(x: animX, y: animY)
-                Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
-                    .position(x: animX, y: animY)
+                if revealOnFirstLoad && !hasRevealed && tipPoints.count > 1 {
+                    // First-load reveal: dot merambat mengikuti ujung garis yang
+                    // sedang tumbuh (tipX = revealClipWidth yang di-animate).
+                    // Garis referensi horizontal disembunyikan dulu — muncul saat
+                    // reveal selesai (cabang else di bawah).
+                    ZStack {
+                        Circle().fill(dotColor).frame(width: 9, height: 9)
+                            .shadow(color: dotColor.opacity(0.7), radius: 5)
+                        Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
+                    }
+                    .frame(width: 9, height: 9)
+                    .position(x: 0, y: 0)
+                    .modifier(GrowingLineTip(tipX: revealClipWidth, points: tipPoints))
+                } else {
+                    let animX = animatedData.points.last.map { $0.x } ?? xFor(index: data.count - 1, count: data.count, width: chartSize.width)
+                    let animY = animatedData.points.last.map { $0.y } ?? yLast
+
+                    AnimatableHDashLine(y: animY)
+                        .stroke(dotColor.opacity(0.70), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                        .animation(.spring(response: 1.55, dampingFraction: 1.0), value: animY)
+                    Circle().fill(dotColor).frame(width: 9, height: 9)
+                        .shadow(color: dotColor.opacity(0.7), radius: 5)
+                        .position(x: animX, y: animY)
+                    Circle().fill(Color.SurfaceWhite).frame(width: 4, height: 4)
+                        .position(x: animX, y: animY)
+                }
             }
 
             // Crosshair
@@ -734,7 +836,68 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                     yPos: yPos(for: point.close, in: chartSize)
                 )
             }
+
+            // Analyst price-target markers (titik kuning yang bisa ditekan).
+            // Disembunyikan saat scrub garis harga agar tidak menutupi crosshair.
+            let dots = analystDots
+            if !dots.isEmpty {
+                ZStack {
+                    ForEach(dots) { dot in
+                        analystMarker(dot)
+                    }
+                    if let key = selectedAnalystDate,
+                       let dot = dots.first(where: { $0.id == key }) {
+                        AnalystTargetCallout(rows: dot.rows, date: dot.date, market: market,
+                                             dotX: dot.x, dotY: dot.y,
+                                             chartSize: chartSize)
+                    }
+                }
+                .opacity(isDragging ? 0 : 1)
+                .animation(.easeInOut(duration: 0.15), value: isDragging)
+                // Titik ikut morph bersama garis: posisi (dot.x/dot.y) disampel
+                // dari animatedData, jadi saat garis beranimasi transisi rentang,
+                // titik meluncur dengan spring yang sama, bukan lompat ke target.
+                .animation(.spring(response: 1.55, dampingFraction: 1.0), value: animatedData)
+            }
         }
+    }
+
+    /// Satu titik kuning + hit-area besar untuk price-target satu tanggal.
+    /// Menampilkan badge angka bila ada >1 firma di tanggal itu.
+    @ViewBuilder
+    private func analystMarker(_ dot: AnalystDot) -> some View {
+        let isSel = selectedAnalystDate == dot.id
+        ZStack {
+            Circle().fill(Color.PrimaryYellow.opacity(0.22))
+                .frame(width: isSel ? 22 : 16, height: isSel ? 22 : 16)
+            Circle().fill(Color.PrimaryYellow)
+                .frame(width: 10, height: 10)
+                .overlay(Circle().stroke(Color.DarkPurpleAppBackground, lineWidth: 1.5))
+                .shadow(color: Color.PrimaryYellow.opacity(0.6), radius: isSel ? 5 : 3)
+        }
+        .overlay(alignment: .topTrailing) {
+            if dot.count > 1 {
+                Text("\(dot.count)")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundColor(Color.DarkPurpleAppBackground)
+                    .frame(minWidth: 14, minHeight: 14)
+                    .background(Circle().fill(Color.PrimaryYellow))
+                    .overlay(Circle().stroke(Color.DarkPurpleAppBackground, lineWidth: 1))
+                    .offset(x: 7, y: -7)
+            }
+        }
+        .frame(width: 32, height: 32)          // perbesar area sentuh
+        .contentShape(Circle())
+        .position(x: dot.x, y: dot.y)
+        // highPriorityGesture agar tap pada dot menang atas gesture scrub garis.
+        .highPriorityGesture(
+            TapGesture().onEnded {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.easeOut(duration: 0.15)) {
+                    selectedAnalystDate = isSel ? nil : dot.id
+                }
+            }
+        )
     }
 
     // MARK: - Drag Gesture
@@ -743,6 +906,7 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
         DragGesture(minimumDistance: 0)
             .onChanged { val in
                 isDragging = true
+                if selectedAnalystDate != nil { selectedAnalystDate = nil }
                 let data = chartVM.dataPoints
                 guard !data.isEmpty, chartSize.width > 0 else { return }
 
@@ -869,6 +1033,75 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
         let norm  = range > 0 ? (value - chartVM.minPrice) / range : 0.5
         return topPad + usable * (1 - norm)
     }
+
+    /// Titik (x, y) PADA GARIS untuk sebuah indeks candle. Berbeda dengan
+    /// `xFor` + `yPos(close)`: X **dan** Y sama-sama disampel dari `animatedData`
+    /// (garis yang sedang beranimasi), sehingga marker analis ikut morph naik-
+    /// turun bersama garis saat transisi rentang — bukan geser horizontal lalu
+    /// snap vertikal. Untuk 1D (garis pakai OneDayLineShape, bukan animatedData)
+    /// jatuh ke perhitungan slot + `yPos(close)`.
+    private func linePoint(dataIndex idx: Int, count: Int) -> CGPoint {
+        if chartVM.selectedRange == .oneDay || animatedData.points.isEmpty {
+            return CGPoint(x: xFor(index: idx, count: count, width: chartSize.width),
+                           y: yPos(for: chartVM.dataPoints[idx].close, in: chartSize))
+        }
+        let fraction = CGFloat(idx) / CGFloat(max(count - 1, 1))
+        let ptIndex  = Int((fraction * CGFloat(animatedData.points.count - 1)).rounded())
+            .clamped(to: 0...(animatedData.points.count - 1))
+        let p = animatedData.points[ptIndex]
+        return CGPoint(x: p.x, y: p.y)
+    }
+
+    // MARK: - Analyst Target Markers
+
+    /// Satu titik kuning di chart = SEMUA price-target analis pada satu tanggal
+    /// kalender (beberapa firma sering rilis di hari yang sama, mis. sehabis
+    /// earnings). `rows` berisi semua firma di hari itu.
+    struct AnalystDot: Identifiable {
+        let id: String              // kunci hari kalender
+        let date: Date
+        let rows: [AnalystRatingRow]
+        let x: CGFloat
+        let y: CGFloat
+        var count: Int { rows.count }
+    }
+
+    /// Titik kuning untuk price-target analis yang tanggalnya jatuh di dalam
+    /// rentang data yang sedang tampil, DIKELOMPOKKAN per hari kalender agar
+    /// firma-firma di tanggal sama tidak menumpuk jadi satu titik. Titik
+    /// MENEMPEL di garis harga: X & Y disampel dari `animatedData` (via
+    /// `linePoint`) sehingga titik ikut morph bersama garis saat transisi
+    /// rentang. Nilai target tiap firma ditampilkan di callout saat dot ditekan.
+    private var analystDots: [AnalystDot] {
+        let data = chartVM.dataPoints
+        guard data.count > 1, chartSize.width > 0, chartSize.height > 0,
+              let firstDate = data.first?.date, let lastDate = data.last?.date
+        else { return [] }
+
+        let cal = Calendar(identifier: .gregorian)
+        let valid = analystTargets.filter { row in
+            guard let date = row.date, let pt = row.currentPT, pt > 0 else { return false }
+            return date >= firstDate && date <= lastDate
+        }
+        let buckets = Dictionary(grouping: valid) { row in cal.startOfDay(for: row.date!) }
+
+        return buckets.compactMap { (day, rows) -> AnalystDot? in
+            guard let idx = nearestDataIndex(to: day, in: data) else { return nil }
+            let p = linePoint(dataIndex: idx, count: data.count)
+            let sorted = rows.sorted { ($0.firm) < ($1.firm) }
+            return AnalystDot(id: String(day.timeIntervalSinceReferenceDate),
+                              date: day, rows: sorted, x: p.x, y: p.y)
+        }
+        .sorted { $0.date < $1.date }
+    }
+
+    /// Indeks candle dengan tanggal paling dekat ke `date` (data terurut menaik).
+    private func nearestDataIndex(to date: Date, in data: [StockDataPoint]) -> Int? {
+        data.enumerated().min(by: {
+            abs($0.element.date.timeIntervalSince(date)) <
+            abs($1.element.date.timeIntervalSince(date))
+        })?.offset
+    }
 }
 
 // MARK: - Shape Definitions
@@ -912,6 +1145,45 @@ struct AnimatableClipRect: Shape {
     var clipWidth: CGFloat
     var animatableData: CGFloat { get { clipWidth } set { clipWidth = newValue } }
     func path(in rect: CGRect) -> Path { Path(CGRect(x: 0, y: 0, width: max(0, clipWidth), height: rect.height)) }
+}
+
+/// Menggeser view (dot harga terakhir) mengikuti UJUNG garis yang sedang tumbuh
+/// kiri→kanan saat reveal pertama. `tipX` di-animate (= revealClipWidth); tiap
+/// frame kita cari y pada polyline `points` di x = tipX, lalu translate view
+/// (yang di-`position(x:0,y:0)`) ke titik itu. Karena `tipX` adalah
+/// `animatableData`, SwiftUI meng-interpolasi-nya per-frame sehingga dot benar-
+/// benar ikut merambat di sepanjang garis, bukan diam di posisi akhir.
+struct GrowingLineTip: GeometryEffect {
+    var tipX: CGFloat
+    let points: [CGPoint]
+
+    var animatableData: CGFloat {
+        get { tipX }
+        set { tipX = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        guard let first = points.first, let last = points.last else {
+            return ProjectionTransform()
+        }
+        let x = min(max(tipX, first.x), last.x)
+        let y = interpolatedY(atX: x)
+        return ProjectionTransform(CGAffineTransform(translationX: x, y: y))
+    }
+
+    /// y pada polyline (titik terurut menaik di x) untuk x tertentu.
+    private func interpolatedY(atX x: CGFloat) -> CGFloat {
+        guard let first = points.first, let last = points.last else { return 0 }
+        if x <= first.x { return first.y }
+        if x >= last.x  { return last.y }
+        for i in 1..<points.count where points[i].x >= x {
+            let p0 = points[i - 1], p1 = points[i]
+            let dx = p1.x - p0.x
+            let t  = dx == 0 ? 0 : (x - p0.x) / dx
+            return p0.y + (p1.y - p0.y) * t
+        }
+        return last.y
+    }
 }
 
 struct AnimatableClipAbove: Shape {
@@ -1007,6 +1279,92 @@ struct TooltipView: View {
             )
             .position(x: clampedX, y: h / 2 + 4)
             .transition(.opacity)
+    }
+}
+
+// MARK: - Analyst Target Callout
+
+/// Kotak info yang muncul saat sebuah titik kuning ditekan: tanggal + daftar
+/// SEMUA firma yang merilis price target di hari itu (firma, nilai target, aksi
+/// rating). Memposisikan dirinya sendiri di atas dot (atau di bawah bila dekat
+/// tepi atas), dengan X di-clamp agar tetap di dalam lebar chart.
+struct AnalystTargetCallout: View {
+
+    let rows:      [AnalystRatingRow]
+    let date:      Date
+    let market:    String
+    let dotX:      CGFloat
+    let dotY:      CGFloat
+    let chartSize: CGSize
+
+    private let calloutWidth: CGFloat = 196
+    private var estimatedHeight: CGFloat { 24 + CGFloat(rows.count) * 18 + 12 }
+
+    private var clampedX: CGFloat {
+        let half = calloutWidth / 2 + 4
+        return min(max(dotX, half), chartSize.width - half)
+    }
+
+    /// Di atas dot bila ada ruang, kalau tidak di bawahnya.
+    private var calloutY: CGFloat {
+        let above = dotY - estimatedHeight / 2 - 12
+        if above - estimatedHeight / 2 >= 0 { return above }
+        return dotY + estimatedHeight / 2 + 12
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "id_ID")
+        df.dateFormat = "d MMM yyyy"
+        return df
+    }()
+
+    /// Target analis: simbol mata uang + tanpa desimal (mis. "$2.000" / "Rp2.000").
+    private func targetText(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return currencySymbol(for: market) + formatIDR(value, decimals: 0)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(Self.dateFormatter.string(from: date))
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.primary)
+                Spacer(minLength: 8)
+                Text(rows.count == 1 ? "1 analis" : "\(rows.count) analis")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Color.PrimaryYellow)
+            }
+
+            ForEach(rows) { row in
+                HStack(spacing: 6) {
+                    Text(row.firm.isEmpty ? "Analis" : row.firm)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(AnalystRatingsCard.actionLabel(row.action))
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(AnalystRatingsCard.actionColor(row.action))
+                    Text(targetText(row.currentPT))
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundColor(.primary)
+                }
+            }
+        }
+        .frame(width: calloutWidth, alignment: .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.appElevatedBackground)
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.PrimaryYellow.opacity(0.5), lineWidth: 1))
+                .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 3)
+        )
+        .position(x: clampedX, y: calloutY)
+        .transition(.opacity.combined(with: .scale(scale: 0.9)))
     }
 }
 
@@ -1451,7 +1809,7 @@ struct RollingPriceView: View {
     let price: Double; let fontSize: CGFloat; var isInteractive: Bool = false
     /// "IDX" | "NASDAQ" | "NYSE" | "ETF" — default "IDX" untuk backward-compat.
     var market: String = "IDX"
-    private var formatted: String { formatPrice(price, market: market) }
+    private var formatted: String { formatPriceWithSymbol(price, market: market) }
     private var tokens: [(id: Int, char: Character)] { Array(formatted.enumerated()).map { ($0.offset, $0.element) } }
 
     var body: some View {

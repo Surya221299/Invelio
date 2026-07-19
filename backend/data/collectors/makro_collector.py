@@ -36,15 +36,10 @@ from bs4 import BeautifulSoup
 from loguru import logger
 
 from backend.config import settings
+from backend.utils.http import fetch_html
 
 # Timeout untuk HTTP requests (detik)
 _HTTP_TIMEOUT = 30.0
-
-# User agent untuk scraping
-_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Apple Silicon Mac OS X) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 
 # Timezone WIB
 _WIB = timezone(timedelta(hours=7))
@@ -198,15 +193,9 @@ async def _scrape_bi_rate_from_website() -> dict[str, Any] | None:
     url = "https://www.bi.go.id/id/statistik/indikator/bi-7day-rr.aspx"
 
     try:
-        async with httpx.AsyncClient(
-            timeout=_HTTP_TIMEOUT,
-            follow_redirects=True,
-            headers={"User-Agent": _USER_AGENT},
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        html = await fetch_html(url, timeout=_HTTP_TIMEOUT)
 
-        soup = await asyncio.to_thread(BeautifulSoup, response.text, "html.parser")
+        soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
 
         # Cari elemen yang berisi BI-7DRR
         # Struktur halaman BI bisa berubah, jadi kita cari dengan beberapa pola
@@ -283,15 +272,9 @@ async def _scrape_bi_rate_from_moneter() -> dict[str, Any] | None:
     url = "https://www.bi.go.id/id/statistik/indikator/data-kurs.aspx"
 
     try:
-        async with httpx.AsyncClient(
-            timeout=_HTTP_TIMEOUT,
-            follow_redirects=True,
-            headers={"User-Agent": _USER_AGENT},
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        html = await fetch_html(url, timeout=_HTTP_TIMEOUT)
 
-        soup = await asyncio.to_thread(BeautifulSoup, response.text, "html.parser")
+        soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
 
         # Cari semua teks yang mengandung angka persentase dalam konteks BI Rate
         page_text = soup.get_text()
@@ -339,15 +322,9 @@ async def collect_inflasi() -> dict[str, Any] | None:
     # Strategi 1: Scrape dari website BI
     url = "https://www.bi.go.id/id/statistik/indikator/data-inflasi.aspx"
     try:
-        async with httpx.AsyncClient(
-            timeout=_HTTP_TIMEOUT,
-            follow_redirects=True,
-            headers={"User-Agent": _USER_AGENT},
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        html = await fetch_html(url, timeout=_HTTP_TIMEOUT)
 
-        soup = await asyncio.to_thread(BeautifulSoup, response.text, "html.parser")
+        soup = await asyncio.to_thread(BeautifulSoup, html, "html.parser")
 
         # Cari tabel inflasi — biasanya berisi data bulanan
         tables = soup.find_all("table")
@@ -622,12 +599,10 @@ async def _get_asing_net_buy_from_news() -> dict[str, Any] | None:
     url = f"https://news.google.com/rss/search?q={encoded_query}&hl=id&gl=ID&ceid=ID:id"
     
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            
+        text = await fetch_html(url, timeout=15.0, user_agent=None)
+
         import re
-        cleaned_text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;)', '&amp;', resp.text)
+        cleaned_text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;)', '&amp;', text)
         feed = feedparser.parse(cleaned_text)
         
         if not feed.entries:
@@ -701,12 +676,10 @@ async def _get_bi_rate_from_news() -> dict[str, Any] | None:
     url = f"https://news.google.com/rss/search?q={encoded_query}&hl=id&gl=ID&ceid=ID:id"
     
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            
+        text = await fetch_html(url, timeout=15.0, user_agent=None)
+
         import re
-        cleaned_text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;)', '&amp;', resp.text)
+        cleaned_text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;)', '&amp;', text)
         feed = feedparser.parse(cleaned_text)
         
         if not feed.entries:
@@ -782,12 +755,10 @@ async def _get_inflasi_from_news() -> dict[str, Any] | None:
     url = f"https://news.google.com/rss/search?q={encoded_query}&hl=id&gl=ID&ceid=ID:id"
     
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            
+        text = await fetch_html(url, timeout=15.0, user_agent=None)
+
         import re
-        cleaned_text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;)', '&amp;', resp.text)
+        cleaned_text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#[0-9]+;)', '&amp;', text)
         feed = feedparser.parse(cleaned_text)
         
         if not feed.entries:

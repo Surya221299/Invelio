@@ -23,10 +23,18 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
 
     let livePriceStore = LivePriceStore.shared
 
+    /// Streamer per-simbol untuk harga live ON-DEMAND. Dipakai untuk saham yang
+    /// dibuka dari Search dan BELUM ada di watchlist — jadi tidak ikut broadcast
+    /// `/ws/stocks` milik LivePriceStore. Backend `/ws/stocks/{symbol}?market=`
+    /// fetch simbol apapun via yfinance, sehingga harga tetap tampil walau
+    /// `/candles` (chart history) dan broadcast watchlist kosong.
+    private let symbolStreamer = StockPriceStreamer()
+
     // MARK: - Earnings & Rally Streak
 
     @Published private(set) var earningsInfo: EarningsInfo?
     @Published private(set) var rallyStreak:  RallyStreakInfo?
+    @Published private(set) var analystRatings: AnalystRatings?
 
     let item: PortfolioItem
 
@@ -78,6 +86,11 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
         livePriceStore.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+
+        // Sama untuk streamer per-simbol on-demand (harga saham hasil search).
+        symbolStreamer.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Public Actions
@@ -86,7 +99,8 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
         isLoading    = true
         errorMessage = nil
         let (points, _) = await fetchChartUseCase.execute(symbol: item.symbol,
-                                                           range: selectedRange)
+                                                           range: selectedRange,
+                                                           market: item.market)
         dataPoints = selectedRange == .oneDay ? normalizeToSlots(points) : points
         if dataPoints.isEmpty {
             errorMessage = "Tidak ada data untuk \(item.symbol) (\(selectedRange.rawValue))"
@@ -107,6 +121,11 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
         if let live = livePriceStore.price(for: item.symbol), live.price > 0 {
             return live.price
         }
+        // Saham hasil search yang belum di watchlist: pakai harga on-demand dari
+        // streamer per-simbol sebelum jatuh ke candle terakhir.
+        if let onDemand = symbolStreamer.latest?.price, onDemand > 0 {
+            return onDemand
+        }
         return latestPrice
     }
 
@@ -116,19 +135,24 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
     /// terpisah — lihat ExtendedHoursBadgeView). `nil` kalau belum ada update
     /// sama sekali dari LivePriceStore (View fallback ke snapshot awal).
     var streamedChange: Double? {
-        livePriceStore.price(for: item.symbol)?.change
+        livePriceStore.price(for: item.symbol)?.change ?? symbolStreamer.latest?.change
     }
 
     var streamedPctChange: Double? {
-        livePriceStore.price(for: item.symbol)?.pctChange
+        livePriceStore.price(for: item.symbol)?.pctChange ?? symbolStreamer.latest?.pctChange
     }
 
     func startPriceStream() {
         livePriceStore.acquire()
+        // Streamer on-demand: memastikan harga muncul untuk saham hasil search
+        // yang belum masuk broadcast watchlist. `connect` no-op kalau simbol yang
+        // sama sudah tersambung.
+        symbolStreamer.connect(symbol: item.symbol, market: item.market)
     }
 
     func stopPriceStream() {
         livePriceStore.release()
+        symbolStreamer.disconnect()
     }
 
     /// Ambil jadwal earnings & rally streak. Dipanggil sekali saat halaman
@@ -139,6 +163,14 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
         async let rally    = try? detailRepository.fetchRallyStreak(symbol: item.symbol)
         earningsInfo = await earnings
         rallyStreak  = await rally
+    }
+
+    /// Ambil data perkiraan analis (konsensus + riwayat rating). Dipanggil
+    /// sekali saat halaman detail muncul (cache backend sendiri sudah 6 jam).
+    func fetchAnalystRatings() async {
+        analystRatings = try? await detailRepository.fetchAnalystRatings(
+            symbol: item.symbol, market: item.market
+        )
     }
 
     func oneDaySlotIndex(for date: Date) -> Int {
@@ -191,7 +223,18 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
         } else {
             if cal.isDate(openDate, inSameDayAs: now) {
                 let minutes = now.timeIntervalSince(openDate) / 60.0
-                currentSlotIdx = max(0, min(Int(minutes / 5.0), totalSlots - 1))
+                let rawIdx  = max(0, min(Int(minutes / 5.0), totalSlots - 1))
+                // Selama jam ISTIRAHAT bursa (12:00–13:30 Sen–Kam / 11:30–14:00 Jum)
+                // tidak ada perdagangan. Bekukan di slot penutupan Sesi I supaya
+                // chart tidak menggambar garis flat yang merambat ke kanan (dan
+                // dot "live" tidak ikut merayap) sepanjang istirahat.
+                if IDXTradingCalendar.isMiddaySessionBreak(now) {
+                    let capMins = IDXTradingCalendar.session1CloseMinutes(now) - openMins
+                    let cap     = max(0, min(capMins / 5, totalSlots - 1))
+                    currentSlotIdx = min(rawIdx, cap)
+                } else {
+                    currentSlotIdx = rawIdx
+                }
             } else {
                 currentSlotIdx = totalSlots - 1
             }

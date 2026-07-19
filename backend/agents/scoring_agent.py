@@ -71,6 +71,7 @@ from sqlalchemy import func, select
 
 from backend.config import settings
 from backend.utils.ticker import get_yf_symbol, normalize_market
+from backend.utils.text import strip_alasan_noise
 from backend.db.postgres import (
     Berita,
     Fundamental,
@@ -845,15 +846,16 @@ def _skor_risiko(
     return round(max(0.0, min(100.0, skor)), 2)
 
 
-async def scrape_and_index_news_for_emiten(kode: str) -> None:
+async def scrape_and_index_news_for_emiten(kode: str, market: str = "IDX") -> None:
     """
     Melakukan scraping berita terupdate untuk emiten tertentu secara real-time,
     menganalisis sentimennya dengan LLM (Qwen), menyimpannya ke database (PostgreSQL),
     dan meng-index-nya ke ChromaDB (RAG).
-    
+
     Dirancang untuk berjalan di background agar tidak memblock proses scoring utama.
+    `market` menentukan locale berita (IDX -> Indonesia, US -> Inggris).
     """
-    logger.info(f"🔍 [On-Demand Scraping] Memulai pencarian berita segar untuk {kode}...")
+    logger.info(f"🔍 [On-Demand Scraping] Memulai pencarian berita segar untuk {kode} (market={market})...")
     try:
         from backend.data.collectors.berita_collector import collect_berita
         from backend.data.preprocessors.data_cleaner import clean_berita, hitung_sentimen_qwen
@@ -861,7 +863,7 @@ async def scrape_and_index_news_for_emiten(kode: str) -> None:
         from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         # 1. Scraping berita (hari_terakhir=7 untuk cakupan mingguan)
-        raw_berita = await collect_berita(kode, hari_terakhir=7)
+        raw_berita = await collect_berita(kode, hari_terakhir=7, market=market)
         if not raw_berita:
             logger.warning(f"⚠️ [On-Demand Scraping] Tidak menemukan berita baru untuk {kode} di internet.")
             return
@@ -1260,7 +1262,7 @@ async def hitung_skor(state: ScoringState) -> dict[str, Any]:
                     level="ERROR",
                     auto_open_browser=False
                 )
-                asyncio.create_task(scrape_and_index_news_for_emiten(kode))
+                asyncio.create_task(scrape_and_index_news_for_emiten(kode, market=market_map.get(kode, "IDX")))
 
             # ─── Hitung PBV Relatif ───
             pbv_val = data_fundamental.get("pbv")
@@ -1732,20 +1734,7 @@ def _parse_llm_response(
         rekomendasi = "NEUTRAL"
 
     # Bersihkan alasan secara agresif dari sub-judul, bracket [], dan kata rekomendasi terisolasi
-    cleaned_lines = []
-    for line in alasan.split("\n"):
-        line_stripped = line.strip()
-        if not line_stripped:
-            continue
-        # Hapus header bracket
-        if line_stripped.startswith("[") and line_stripped.endswith("]"):
-            continue
-        # Hapus line yang hanya berisi kata rekomendasi
-        if line_stripped.upper() in ["RECOMMENDED", "NEUTRAL", "NEGATIVE", "RECOMMENDATION", "REKOMENDASI", "BUY", "SELL", "HOLD"]:
-            continue
-        cleaned_lines.append(line_stripped)
-
-    alasan = " ".join(cleaned_lines).strip()
+    alasan = " ".join(strip_alasan_noise(alasan)).strip()
     if not alasan:
         alasan = "Analisis tidak tersedia."
 

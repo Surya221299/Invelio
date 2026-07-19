@@ -294,6 +294,15 @@ class Settings(BaseSettings):
         default="https://webapi.bps.go.id/v1",
         description="Base URL BPS API",
     )
+    fred_api_key: str = Field(
+        default="",
+        description=(
+            "API key FRED (Federal Reserve Economic Data) untuk angka aktual "
+            "faktor makro AS di tab Release. Gratis dari "
+            "https://fredaccount.stlouisfed.org/apikeys. Kosong = fitur angka "
+            "aktual dimatikan (jadwal & edukasi tetap jalan)."
+        ),
+    )
 
     # ================================================================
     # Tailscale VPN
