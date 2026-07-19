@@ -118,7 +118,8 @@ struct StockDetailView: View {
                         chartSize:         $chartSize,
                         accentColor:       accentColor,
                         displayIsPositive: displayIsPositive,
-                        market:            market
+                        market:            market,
+                        analystTargets:    viewModel.analystRatings?.history ?? []
                     )
                     .frame(height: 230)
                     .background(
@@ -417,6 +418,17 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
     /// langsung anak ScrollView) tetap pakai `.gesture` default.
     var useHighPriorityDrag: Bool = false
 
+    /// Riwayat price target dari analis. Ditampilkan sebagai titik kuning yang
+    /// bisa ditekan, diposisikan di sumbu-X sesuai tanggal rating & sumbu-Y
+    /// sesuai nilai target. Hanya baris dengan tanggal DI DALAM rentang data
+    /// yang tampil sekarang (`dataPoints.first…last`) dan target > 0 yang
+    /// digambar. Default kosong → chart lain (Portfolio) tidak terpengaruh.
+    var analystTargets: [AnalystRatingRow] = []
+
+    /// Kunci tanggal marker analis yang sedang dipilih (callout terbuka). Reset
+    /// saat scrub garis harga atau ganti rentang waktu.
+    @State private var selectedAnalystDate: String? = nil
+
     @State private var animatedData:        AnimatableChartData = .zero
     @State private var oneDayReady:         Bool    = false
     @State private var oneDayClipWidth:     CGFloat = 0
@@ -495,7 +507,10 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
             updatePulse()
         }
         .onAppear { updatePulse() }
-        .onChange(of: chartVM.selectedRange) { _, _ in updatePulse() }
+        .onChange(of: chartVM.selectedRange) { _, _ in
+            updatePulse()
+            selectedAnalystDate = nil
+        }
     }
 
     /// Scrub gesture di-attach sebagai high-priority hanya bila diminta (Portfolio
@@ -821,7 +836,64 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                     yPos: yPos(for: point.close, in: chartSize)
                 )
             }
+
+            // Analyst price-target markers (titik kuning yang bisa ditekan).
+            // Disembunyikan saat scrub garis harga agar tidak menutupi crosshair.
+            let dots = analystDots
+            if !dots.isEmpty {
+                ZStack {
+                    ForEach(dots) { dot in
+                        analystMarker(dot)
+                    }
+                    if let key = selectedAnalystDate,
+                       let dot = dots.first(where: { $0.id == key }) {
+                        AnalystTargetCallout(rows: dot.rows, date: dot.date, market: market,
+                                             dotX: dot.x, dotY: dot.y,
+                                             chartSize: chartSize)
+                    }
+                }
+                .opacity(isDragging ? 0 : 1)
+                .animation(.easeInOut(duration: 0.15), value: isDragging)
+            }
         }
+    }
+
+    /// Satu titik kuning + hit-area besar untuk price-target satu tanggal.
+    /// Menampilkan badge angka bila ada >1 firma di tanggal itu.
+    @ViewBuilder
+    private func analystMarker(_ dot: AnalystDot) -> some View {
+        let isSel = selectedAnalystDate == dot.id
+        ZStack {
+            Circle().fill(Color.PrimaryYellow.opacity(0.22))
+                .frame(width: isSel ? 22 : 16, height: isSel ? 22 : 16)
+            Circle().fill(Color.PrimaryYellow)
+                .frame(width: 10, height: 10)
+                .overlay(Circle().stroke(Color.DarkPurpleAppBackground, lineWidth: 1.5))
+                .shadow(color: Color.PrimaryYellow.opacity(0.6), radius: isSel ? 5 : 3)
+        }
+        .overlay(alignment: .topTrailing) {
+            if dot.count > 1 {
+                Text("\(dot.count)")
+                    .font(.system(size: 9, weight: .heavy))
+                    .foregroundColor(Color.DarkPurpleAppBackground)
+                    .frame(minWidth: 14, minHeight: 14)
+                    .background(Circle().fill(Color.PrimaryYellow))
+                    .overlay(Circle().stroke(Color.DarkPurpleAppBackground, lineWidth: 1))
+                    .offset(x: 7, y: -7)
+            }
+        }
+        .frame(width: 32, height: 32)          // perbesar area sentuh
+        .contentShape(Circle())
+        .position(x: dot.x, y: dot.y)
+        // highPriorityGesture agar tap pada dot menang atas gesture scrub garis.
+        .highPriorityGesture(
+            TapGesture().onEnded {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.easeOut(duration: 0.15)) {
+                    selectedAnalystDate = isSel ? nil : dot.id
+                }
+            }
+        )
     }
 
     // MARK: - Drag Gesture
@@ -830,6 +902,7 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
         DragGesture(minimumDistance: 0)
             .onChanged { val in
                 isDragging = true
+                if selectedAnalystDate != nil { selectedAnalystDate = nil }
                 let data = chartVM.dataPoints
                 guard !data.isEmpty, chartSize.width > 0 else { return }
 
@@ -955,6 +1028,58 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
         let range = chartVM.maxPrice - chartVM.minPrice
         let norm  = range > 0 ? (value - chartVM.minPrice) / range : 0.5
         return topPad + usable * (1 - norm)
+    }
+
+    // MARK: - Analyst Target Markers
+
+    /// Satu titik kuning di chart = SEMUA price-target analis pada satu tanggal
+    /// kalender (beberapa firma sering rilis di hari yang sama, mis. sehabis
+    /// earnings). `rows` berisi semua firma di hari itu.
+    struct AnalystDot: Identifiable {
+        let id: String              // kunci hari kalender
+        let date: Date
+        let rows: [AnalystRatingRow]
+        let x: CGFloat
+        let y: CGFloat
+        var count: Int { rows.count }
+    }
+
+    /// Titik kuning untuk price-target analis yang tanggalnya jatuh di dalam
+    /// rentang data yang sedang tampil, DIKELOMPOKKAN per hari kalender agar
+    /// firma-firma di tanggal sama tidak menumpuk jadi satu titik. Titik
+    /// MENEMPEL di garis harga: X & Y diambil dari candle terdekat dengan
+    /// tanggal (via `xFor` & `yPos` pada harga close-nya). Nilai target tiap
+    /// firma ditampilkan di callout saat dot ditekan.
+    private var analystDots: [AnalystDot] {
+        let data = chartVM.dataPoints
+        guard data.count > 1, chartSize.width > 0, chartSize.height > 0,
+              let firstDate = data.first?.date, let lastDate = data.last?.date
+        else { return [] }
+
+        let cal = Calendar(identifier: .gregorian)
+        let valid = analystTargets.filter { row in
+            guard let date = row.date, let pt = row.currentPT, pt > 0 else { return false }
+            return date >= firstDate && date <= lastDate
+        }
+        let buckets = Dictionary(grouping: valid) { row in cal.startOfDay(for: row.date!) }
+
+        return buckets.compactMap { (day, rows) -> AnalystDot? in
+            guard let idx = nearestDataIndex(to: day, in: data) else { return nil }
+            let x = xFor(index: idx, count: data.count, width: chartSize.width)
+            let y = yPos(for: data[idx].close, in: chartSize)
+            let sorted = rows.sorted { ($0.firm) < ($1.firm) }
+            return AnalystDot(id: String(day.timeIntervalSinceReferenceDate),
+                              date: day, rows: sorted, x: x, y: y)
+        }
+        .sorted { $0.date < $1.date }
+    }
+
+    /// Indeks candle dengan tanggal paling dekat ke `date` (data terurut menaik).
+    private func nearestDataIndex(to date: Date, in data: [StockDataPoint]) -> Int? {
+        data.enumerated().min(by: {
+            abs($0.element.date.timeIntervalSince(date)) <
+            abs($1.element.date.timeIntervalSince(date))
+        })?.offset
     }
 }
 
@@ -1133,6 +1258,86 @@ struct TooltipView: View {
             )
             .position(x: clampedX, y: h / 2 + 4)
             .transition(.opacity)
+    }
+}
+
+// MARK: - Analyst Target Callout
+
+/// Kotak info yang muncul saat sebuah titik kuning ditekan: tanggal + daftar
+/// SEMUA firma yang merilis price target di hari itu (firma, nilai target, aksi
+/// rating). Memposisikan dirinya sendiri di atas dot (atau di bawah bila dekat
+/// tepi atas), dengan X di-clamp agar tetap di dalam lebar chart.
+struct AnalystTargetCallout: View {
+
+    let rows:      [AnalystRatingRow]
+    let date:      Date
+    let market:    String
+    let dotX:      CGFloat
+    let dotY:      CGFloat
+    let chartSize: CGSize
+
+    private let calloutWidth: CGFloat = 196
+    private var estimatedHeight: CGFloat { 24 + CGFloat(rows.count) * 18 + 12 }
+
+    private var clampedX: CGFloat {
+        let half = calloutWidth / 2 + 4
+        return min(max(dotX, half), chartSize.width - half)
+    }
+
+    /// Di atas dot bila ada ruang, kalau tidak di bawahnya.
+    private var calloutY: CGFloat {
+        let above = dotY - estimatedHeight / 2 - 12
+        if above - estimatedHeight / 2 >= 0 { return above }
+        return dotY + estimatedHeight / 2 + 12
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "id_ID")
+        df.dateFormat = "d MMM yyyy"
+        return df
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(Self.dateFormatter.string(from: date))
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.primary)
+                Spacer(minLength: 8)
+                Text(rows.count == 1 ? "1 analis" : "\(rows.count) analis")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Color.PrimaryYellow)
+            }
+
+            ForEach(rows) { row in
+                HStack(spacing: 6) {
+                    Text(row.firm.isEmpty ? "Analis" : row.firm)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(AnalystRatingsCard.actionLabel(row.action))
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(AnalystRatingsCard.actionColor(row.action))
+                    Text(row.currentPT.map { formatPrice($0, market: market) } ?? "—")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundColor(.primary)
+                }
+            }
+        }
+        .frame(width: calloutWidth, alignment: .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.appElevatedBackground)
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.PrimaryYellow.opacity(0.5), lineWidth: 1))
+                .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 3)
+        )
+        .position(x: clampedX, y: calloutY)
+        .transition(.opacity.combined(with: .scale(scale: 0.9)))
     }
 }
 
