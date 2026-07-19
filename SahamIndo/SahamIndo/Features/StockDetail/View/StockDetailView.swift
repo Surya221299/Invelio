@@ -160,6 +160,12 @@ struct StockDetailView: View {
                     )
                     .padding(.horizontal)
 
+                    FundamentalsCard(
+                        fundamentals: viewModel.fundamentals,
+                        moat:         viewModel.moat
+                    )
+                    .padding(.horizontal)
+
                     AnalystRatingsCard(ratings: viewModel.analystRatings)
                         .padding(.horizontal)
 
@@ -181,6 +187,7 @@ struct StockDetailView: View {
         .task { await viewModel.fetchChartData() }
         .task { await viewModel.fetchEarningsAndRallyInfo() }
         .task { await viewModel.fetchAnalystRatings() }
+        .task { await viewModel.fetchFundamentals() }
         .onReceive(
             Timer.publish(every: 5 * 60, on: .main, in: .common).autoconnect()
         ) { _ in

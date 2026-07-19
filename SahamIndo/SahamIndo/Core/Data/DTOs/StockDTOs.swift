@@ -138,6 +138,49 @@ struct RekomendasiResponseDTO: Decodable {
     let rekomendasi: [RekomendasiItemDTO]
 }
 
+struct FundamentalDTO: Decodable {
+    let kode_saham:          String
+    // Valuasi
+    let trailing_pe:         Double?
+    let forward_pe:          Double?
+    let pbv:                 Double?
+    let dividend_yield:      Double?
+    let market_cap:          Double?
+    // Profitabilitas
+    let roe:                 Double?
+    let profit_margin:       Double?
+    let gross_margin:        Double?
+    let operating_margin:    Double?
+    // Kesehatan keuangan
+    let der:                 Double?
+    let free_cash_flow:      Double?
+    let operating_cash_flow: Double?
+    let total_cash:          Double?
+    let total_debt:          Double?
+    // Pertumbuhan terkini
+    let revenue_growth:      Double?
+    let earnings_growth:     Double?
+    // Pertumbuhan deret tahunan + CAGR revenue
+    let annual_growth:       [GrowthRowDTO]?
+    let revenue_cagr:        Double?
+    // Meta
+    let sector:              String?
+    let industry:            String?
+    let currency:            String?
+
+    struct GrowthRowDTO: Decodable {
+        let year:       Int
+        let revenue:    Double?
+        let net_income: Double?
+    }
+}
+
+struct MoatDTO: Decodable {
+    let kode_saham: String
+    let moat_text:  String?
+    let sumber:     String?
+}
+
 struct AIMarketInsightDTO: Decodable {
     let text:      String
     let updatedAt: String?

@@ -41,6 +41,10 @@ enum APIEndpoint {
     /// Perkiraan analis (konsensus price target, distribusi rekomendasi,
     /// riwayat rating action) per emiten
     case analystRatings(symbol: String, market: String?)
+    /// Ringkasan fundamental emiten (valuasi, profitabilitas, kesehatan, growth)
+    case fundamental(symbol: String, market: String?)
+    /// Narasi kualitatif "business moat" (di-generate LLM lokal)
+    case moat(symbol: String, market: String?)
     /// Analisis kesehatan portofolio + narasi harian (POST body holdings)
     case analyzePortfolio
 
@@ -92,6 +96,18 @@ enum APIEndpoint {
         case .rallyStreak(let s):              return "/saham/\(s)/rally-streak"
         case .analystRatings(let s, let market):
             var p = "/saham/\(s)/analis"
+            if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                p += "?market=\(enc)"
+            }
+            return p
+        case .fundamental(let s, let market):
+            var p = "/saham/\(s)/fundamentals"
+            if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                p += "?market=\(enc)"
+            }
+            return p
+        case .moat(let s, let market):
+            var p = "/saham/\(s)/moat"
             if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
                 p += "?market=\(enc)"
             }

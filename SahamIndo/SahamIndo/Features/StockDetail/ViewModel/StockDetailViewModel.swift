@@ -35,6 +35,8 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
     @Published private(set) var earningsInfo: EarningsInfo?
     @Published private(set) var rallyStreak:  RallyStreakInfo?
     @Published private(set) var analystRatings: AnalystRatings?
+    @Published private(set) var fundamentals: CompanyFundamentals?
+    @Published private(set) var moat: MoatInsight?
 
     let item: PortfolioItem
 
@@ -169,6 +171,22 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
     /// sekali saat halaman detail muncul (cache backend sendiri sudah 6 jam).
     func fetchAnalystRatings() async {
         analystRatings = try? await detailRepository.fetchAnalystRatings(
+            symbol: item.symbol, market: item.market
+        )
+    }
+
+    /// Ambil ringkasan fundamental (valuasi/profitabilitas/kesehatan/growth),
+    /// lalu susulkan narasi moat (LLM lokal — lebih lambat, di-fetch terpisah
+    /// supaya kartu angka tampil lebih dulu). Cache backend 6 jam / 24 jam.
+    func fetchFundamentals() async {
+        fundamentals = try? await detailRepository.fetchFundamentals(
+            symbol: item.symbol, market: item.market
+        )
+        await fetchMoat()
+    }
+
+    func fetchMoat() async {
+        moat = try? await detailRepository.fetchMoat(
             symbol: item.symbol, market: item.market
         )
     }
