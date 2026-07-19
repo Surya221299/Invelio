@@ -854,6 +854,10 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                 }
                 .opacity(isDragging ? 0 : 1)
                 .animation(.easeInOut(duration: 0.15), value: isDragging)
+                // Titik ikut morph bersama garis: posisi (dot.x/dot.y) disampel
+                // dari animatedData, jadi saat garis beranimasi transisi rentang,
+                // titik meluncur dengan spring yang sama, bukan lompat ke target.
+                .animation(.spring(response: 1.55, dampingFraction: 1.0), value: animatedData)
             }
         }
     }
@@ -1030,6 +1034,24 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
         return topPad + usable * (1 - norm)
     }
 
+    /// Titik (x, y) PADA GARIS untuk sebuah indeks candle. Berbeda dengan
+    /// `xFor` + `yPos(close)`: X **dan** Y sama-sama disampel dari `animatedData`
+    /// (garis yang sedang beranimasi), sehingga marker analis ikut morph naik-
+    /// turun bersama garis saat transisi rentang — bukan geser horizontal lalu
+    /// snap vertikal. Untuk 1D (garis pakai OneDayLineShape, bukan animatedData)
+    /// jatuh ke perhitungan slot + `yPos(close)`.
+    private func linePoint(dataIndex idx: Int, count: Int) -> CGPoint {
+        if chartVM.selectedRange == .oneDay || animatedData.points.isEmpty {
+            return CGPoint(x: xFor(index: idx, count: count, width: chartSize.width),
+                           y: yPos(for: chartVM.dataPoints[idx].close, in: chartSize))
+        }
+        let fraction = CGFloat(idx) / CGFloat(max(count - 1, 1))
+        let ptIndex  = Int((fraction * CGFloat(animatedData.points.count - 1)).rounded())
+            .clamped(to: 0...(animatedData.points.count - 1))
+        let p = animatedData.points[ptIndex]
+        return CGPoint(x: p.x, y: p.y)
+    }
+
     // MARK: - Analyst Target Markers
 
     /// Satu titik kuning di chart = SEMUA price-target analis pada satu tanggal
@@ -1047,9 +1069,9 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
     /// Titik kuning untuk price-target analis yang tanggalnya jatuh di dalam
     /// rentang data yang sedang tampil, DIKELOMPOKKAN per hari kalender agar
     /// firma-firma di tanggal sama tidak menumpuk jadi satu titik. Titik
-    /// MENEMPEL di garis harga: X & Y diambil dari candle terdekat dengan
-    /// tanggal (via `xFor` & `yPos` pada harga close-nya). Nilai target tiap
-    /// firma ditampilkan di callout saat dot ditekan.
+    /// MENEMPEL di garis harga: X & Y disampel dari `animatedData` (via
+    /// `linePoint`) sehingga titik ikut morph bersama garis saat transisi
+    /// rentang. Nilai target tiap firma ditampilkan di callout saat dot ditekan.
     private var analystDots: [AnalystDot] {
         let data = chartVM.dataPoints
         guard data.count > 1, chartSize.width > 0, chartSize.height > 0,
@@ -1065,11 +1087,10 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
 
         return buckets.compactMap { (day, rows) -> AnalystDot? in
             guard let idx = nearestDataIndex(to: day, in: data) else { return nil }
-            let x = xFor(index: idx, count: data.count, width: chartSize.width)
-            let y = yPos(for: data[idx].close, in: chartSize)
+            let p = linePoint(dataIndex: idx, count: data.count)
             let sorted = rows.sorted { ($0.firm) < ($1.firm) }
             return AnalystDot(id: String(day.timeIntervalSinceReferenceDate),
-                              date: day, rows: sorted, x: x, y: y)
+                              date: day, rows: sorted, x: p.x, y: p.y)
         }
         .sorted { $0.date < $1.date }
     }
@@ -1298,6 +1319,12 @@ struct AnalystTargetCallout: View {
         return df
     }()
 
+    /// Target analis: simbol mata uang + tanpa desimal (mis. "$2.000" / "Rp2.000").
+    private func targetText(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return currencySymbol(for: market) + formatIDR(value, decimals: 0)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
@@ -1320,7 +1347,7 @@ struct AnalystTargetCallout: View {
                     Text(AnalystRatingsCard.actionLabel(row.action))
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundColor(AnalystRatingsCard.actionColor(row.action))
-                    Text(row.currentPT.map { formatPrice($0, market: market) } ?? "—")
+                    Text(targetText(row.currentPT))
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundColor(.primary)
                 }
