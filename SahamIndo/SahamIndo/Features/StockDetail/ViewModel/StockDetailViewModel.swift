@@ -34,6 +34,7 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
 
     @Published private(set) var earningsInfo: EarningsInfo?
     @Published private(set) var rallyStreak:  RallyStreakInfo?
+    @Published private(set) var dividendEvents: DividendEvents?
     @Published private(set) var analystRatings: AnalystRatings?
     @Published private(set) var fundamentals: CompanyFundamentals?
     @Published private(set) var moat: MoatInsight?
@@ -163,8 +164,10 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
     func fetchEarningsAndRallyInfo() async {
         async let earnings = try? detailRepository.fetchEarningsInfo(symbol: item.symbol)
         async let rally    = try? detailRepository.fetchRallyStreak(symbol: item.symbol)
-        earningsInfo = await earnings
-        rallyStreak  = await rally
+        async let dividend = try? detailRepository.fetchDividendEvents(symbol: item.symbol, market: item.market)
+        earningsInfo   = await earnings
+        rallyStreak    = await rally
+        dividendEvents = await dividend
     }
 
     /// Ambil data perkiraan analis (konsensus + riwayat rating). Dipanggil

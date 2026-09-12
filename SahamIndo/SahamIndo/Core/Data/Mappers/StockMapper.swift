@@ -183,4 +183,16 @@ enum StockMapper {
     static func toMoat(_ dto: MoatDTO) -> MoatInsight {
         MoatInsight(symbol: dto.kode_saham, moatText: dto.moat_text, source: dto.sumber)
     }
+
+    static func toDividendEvents(_ dto: DividendEventsDTO) -> DividendEvents {
+        DividendEvents(
+            symbol:         dto.kode_saham,
+            exDividendDate: dto.ex_dividend_date.flatMap { parseFlexibleDate($0) },
+            paymentDate:    dto.dividend_payment_date.flatMap { parseFlexibleDate($0) },
+            amount:         dto.dividend_amount,
+            rate:           dto.dividend_rate,
+            yieldPercent:   dto.dividend_yield,
+            currency:       dto.currency
+        )
+    }
 }

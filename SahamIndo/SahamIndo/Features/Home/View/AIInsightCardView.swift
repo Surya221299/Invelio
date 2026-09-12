@@ -92,9 +92,9 @@ struct AIInsightCardView: View {
             .padding(.bottom, 10)
         }
         .frame(minHeight: 150, alignment: .top)
-        .background(Color.PrimaryYellow.opacity(0.05))
+        .background(Color.AICardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(accent.opacity(0.25), lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
         .padding(.horizontal, 16)
         .onAppear {
             isPulsing = true

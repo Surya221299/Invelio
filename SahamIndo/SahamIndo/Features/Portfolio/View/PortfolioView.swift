@@ -110,8 +110,12 @@ struct PortfolioSummaryCardView: View {
 
     private let accent = Color.AccentGold
     private let green  = Color.ProfitGreen
-    private let red    = Color.LossRed
-    private let cardBg = Color.appCardBackground
+    private let red    = Color.PortfolioLossRed
+    private let cardGradient = LinearGradient(
+        colors: [Color(hex: "665EBF"), Color(hex: "3D3788")],
+        startPoint: .top,
+        endPoint: .bottom
+    )
 
     // MARK: - Live values (mengikuti posisi drag di chart, fallback ke summary asli)
 
@@ -146,14 +150,14 @@ struct PortfolioSummaryCardView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Total Assets")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.75))
                 // Saat men-scrub chart, tampilkan nilai portofolio pada titik yang
                 // dipilih (mengikuti crosshair). Di luar drag, kembalikan ke
                 // animator live (roll/flash dari nilai server).
                 if isDragging {
                     Text(formatIDR(displayedValue))
                         .font(.system(size: 30, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
+                        .foregroundColor(.white)
                 } else {
                     PortfolioValueAnimator()
                 }
@@ -169,7 +173,7 @@ struct PortfolioSummaryCardView: View {
                     }
                     .foregroundColor(isPos ? green : red)
                     .padding(.horizontal, 5).padding(.vertical, 2)
-                    .background((isPos ? green : red).opacity(0.12))
+                    .background((isPos ? green : red).opacity(0.18))
                     .clipShape(Capsule())
                 }
             }
@@ -182,9 +186,9 @@ struct PortfolioSummaryCardView: View {
         .padding(.horizontal, 16)
         .padding(.top, 16)
         .padding(.bottom, 8)
-        .background(cardBg)
+        .background(cardGradient)
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.12), lineWidth: 1))
         .padding(.horizontal, 16)
     }
 }
@@ -202,20 +206,28 @@ struct PortfolioChartSectionView: View {
     @StateObject private var chartVM = PortfolioChartViewModel()
     @State private var chartSize:     CGSize = .zero
 
-    private let orange = Color.orange
+    private let orange = Color.PortfolioOrange
+    private let areaGradientStops: [Gradient.Stop] = [
+        .init(color: Color.PortfolioOrange.opacity(0.30), location: 0.0),
+        .init(color: Color.PortfolioOrange.opacity(0.0),  location: 0.88)
+    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ChartCanvasView(
-                chartVM:           chartVM,
-                selectedPoint:     $selectedPoint,
-                isDragging:        $isDragging,
-                chartSize:         $chartSize,
-                accentColor:       orange,
-                displayIsPositive: true,
-                fixedColor:        orange,
-                revealOnFirstLoad: true,
-                useHighPriorityDrag: true
+                chartVM:                  chartVM,
+                selectedPoint:            $selectedPoint,
+                isDragging:               $isDragging,
+                chartSize:                $chartSize,
+                accentColor:              orange,
+                displayIsPositive:        true,
+                fixedColor:               orange,
+                revealOnFirstLoad:        true,
+                useHighPriorityDrag:      true,
+                showAreaGradient:         true,
+                lineWidth:                1.0,
+                containerBackgroundColor: .clear,
+                customAreaGradientStops:  areaGradientStops
             )
             .frame(height: 180)
             .background(
@@ -726,7 +738,7 @@ struct PortfolioTimeRangeSelectorView<VM: ChartViewModelProtocol>: View {
     @ObservedObject var chartVM: VM
     let holdings:       [Holding]
     let onRangeChange:  () -> Void
-    var tintColor:      Color = Color.orange
+    var tintColor:      Color = Color.VibrantOrange
 
     // MARK: - Computed: ranges yang relevan berdasarkan histori holding
 

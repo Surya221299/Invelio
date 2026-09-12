@@ -181,6 +181,16 @@ struct MoatDTO: Decodable {
     let sumber:     String?
 }
 
+struct DividendEventsDTO: Decodable {
+    let kode_saham:            String
+    let ex_dividend_date:      String?   // "yyyy-MM-dd" — di-parse di mapper (bukan Date)
+    let dividend_payment_date: String?
+    let dividend_amount:       Double?   // nominal per lembar (cash dividend terakhir)
+    let dividend_rate:         Double?   // dividen tahunan per lembar
+    let dividend_yield:        Double?   // SUDAH dalam persen (mis. 5.5 = 5,5%)
+    let currency:              String?
+}
+
 struct AIMarketInsightDTO: Decodable {
     let text:      String
     let updatedAt: String?

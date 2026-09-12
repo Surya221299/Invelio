@@ -94,14 +94,17 @@ PYTHONPATH=. uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload
 4. Xcode akan mengunduh dependencies Swift Package secara otomatis di latar belakang.
 
 ### Langkah B: Sesuaikan Alamat IP Server Backend
-1. Buka file [Services.swift](file:///Users/satriabaladewaharahap/Downloads/SAHAMAPP/SahamIndo/SahamIndo/Services.swift) di panel navigasi Xcode.
-2. Cari baris konstanta `baseURL` (sekitar baris 26):
+1. Buka file `SahamIndo/Core/Data/Network/APIClient.swift` di panel navigasi Xcode.
+2. Cari properti `candidateURLs` (sekitar baris 166):
    ```swift
-   static let baseURL = "http://MacBook-Pro-Satria.local:8080"
+   private static let candidateURLs = [
+       "http://localhost:8080",
+       "http://127.0.0.1:8080",
+   ]
    ```
 3. Sesuaikan nilai tersebut berdasarkan lingkungan Anda:
-   * **Menggunakan iOS Simulator**: Ubah menjadi `"http://localhost:8080"`.
-   * **Menggunakan iPhone Fisik**: Ubah ke alamat IP lokal Mac Anda (misalnya `"http://192.168.1.50:8080"`) dan pastikan HP serta Mac tersambung ke jaringan Wi-Fi yang sama.
+   * **Menggunakan iOS Simulator**: Cukup gunakan `"http://localhost:8080"` (default).
+   * **Menggunakan iPhone Fisik**: Tambahkan alamat IP lokal Mac Anda ke daftar `candidateURLs` (misalnya `"http://192.168.1.50:8080"`) dan pastikan iPhone serta Mac tersambung ke Wi-Fi yang sama.
 
 ### Langkah C: Kompilasi & Jalankan Aplikasi
 1. Pada toolbar atas Xcode, pilih target Simulator target (contoh: *iPhone 16 Pro*).

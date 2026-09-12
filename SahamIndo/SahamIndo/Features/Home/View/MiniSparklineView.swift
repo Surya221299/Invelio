@@ -203,7 +203,7 @@ struct MiniSparklineView: View {
                     return p
                 }
 
-                let lineStyle = StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round)
+                let lineStyle = StrokeStyle(lineWidth: 0.6, lineCap: .round, lineJoin: .round)
                 let line = buildLine()
 
                 ctx.drawLayer { layer in

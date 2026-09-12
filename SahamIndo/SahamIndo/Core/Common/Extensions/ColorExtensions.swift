@@ -31,8 +31,12 @@ extension Color {
     static let SurfaceWhite = Color("SurfaceWhite")
 
     // MARK: Secondary Accents (no dedicated asset yet — defined once, here)
-    static let AccentGold   = Color(hex: "EAB308") // neutral sentiment / baseline markers
-    static let AccentIndigo = Color(hex: "818CF8") // AI / "new" info badges
+    static let AccentGold     = Color(hex: "EAB308") // neutral sentiment / baseline markers
+    static let AccentIndigo   = Color(hex: "818CF8") // AI / "new" info badges
+    static let VibrantOrange   = Color(hex: "FF7A00") // Electric, pure orange that stays bright on dark background
+    static let PortfolioOrange = Color(hex: "FFAE4C") // Warm amber orange for portfolio chart
+    static let PortfolioLossRed = Color(hex: "FF5858") // Bright coral red for portfolio card loss state
+    static let AICardBackground = Color(hex: "1F1A42") // Dark midnight purple for AI Live card
 
     // MARK: Stock Avatar Gradient Palette
     // Deterministic decorative gradients used by StockAvatarView when no logo image exists.

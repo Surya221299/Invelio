@@ -345,6 +345,35 @@ struct MoatInsight {
     var hasText: Bool { !(moatText ?? "").isEmpty }
 }
 
+// MARK: - DividendEvents (agenda korporasi: jadwal dividen)
+
+/// Jadwal dividen — agenda korporasi yang bisa menggerakkan harga saham selain
+/// rilis laporan keuangan. Di tanggal ex-dividen, pembeli tidak lagi berhak
+/// atas dividen sehingga harga cenderung turun ~sebesar dividen.
+struct DividendEvents {
+    let symbol:       String
+    let exDividendDate: Date?
+    let paymentDate:  Date?
+    let amount:       Double?   // nominal per lembar (cash dividend terakhir)
+    let rate:         Double?   // dividen tahunan per lembar
+    let yieldPercent: Double?   // sudah dalam persen (mis. 5.5 = 5,5%)
+    let currency:     String?
+
+    var hasData: Bool { exDividendDate != nil || paymentDate != nil }
+
+    /// Hari kalender sampai ex-dividen (negatif = sudah lewat, nil = tak diketahui).
+    var exDaysUntil:      Int? { Self.daysUntil(exDividendDate) }
+    var paymentDaysUntil: Int? { Self.daysUntil(paymentDate) }
+
+    private static func daysUntil(_ date: Date?) -> Int? {
+        guard let date else { return nil }
+        let cal   = Calendar(identifier: .gregorian)
+        let start = cal.startOfDay(for: Date())
+        let end   = cal.startOfDay(for: date)
+        return cal.dateComponents([.day], from: start, to: end).day
+    }
+}
+
 // MARK: - RallyStreakInfo (harga hijau berturut-turut)
 
 struct RallyStreakInfo {

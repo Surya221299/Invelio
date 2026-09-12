@@ -150,7 +150,7 @@ struct PortfolioHistoryChart: View {
             )
         }
         ctx.stroke(line, with: .color(lineColor),
-                   style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                   style: StrokeStyle(lineWidth: 0.6, lineCap: .round, lineJoin: .round))
 
         // --- Garis horizontal baseline (nilai pertama) ---
         let baseY = yFor(firstValue)

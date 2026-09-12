@@ -962,6 +962,95 @@ def fetch_earnings_info(symbol: str, market: str = "IDX") -> dict:
     return result
 
 
+_yf_dividend_cache = {}
+YF_DIVIDEND_CACHE_TTL = 6 * 3600  # 6 jam — jadwal dividen jarang berubah dalam sehari
+
+
+def fetch_dividend_events(symbol: str, market: str = "IDX") -> dict:
+    """
+    Mengambil agenda korporasi yang bisa menggerakkan harga saham SELAIN rilis
+    laporan keuangan — terutama jadwal DIVIDEN:
+      - Tanggal ex-dividen: mulai tanggal ini pembeli TIDAK lagi berhak atas
+        dividen, sehingga harga saham secara teoritis turun ~sebesar dividen.
+      - Tanggal pembayaran dividen (kalau tersedia; sering kosong untuk IDX).
+      - Nominal dividen per lembar terakhir + tingkat dividen tahunan + yield.
+
+    CATATAN: yfinance hanya andal untuk data dividen. Aksi korporasi lain untuk
+    emiten IDX (RUPS, stock split, rights issue, dsb.) tidak tersedia sebagai
+    event MENDATANG di yfinance, jadi tidak dimasukkan agar tidak menyesatkan.
+    """
+    symbol_upper = symbol.strip().upper()
+    market_clean = normalize_market(market)
+    cache_key = (symbol_upper, market_clean)
+    now = time.time()
+
+    if cache_key in _yf_dividend_cache:
+        cached_time, cached_data = _yf_dividend_cache[cache_key]
+        if now - cached_time < YF_DIVIDEND_CACHE_TTL:
+            return cached_data
+
+    result: dict[str, Any] = {
+        "kode_saham": symbol_upper,
+        "ex_dividend_date": None,
+        "dividend_payment_date": None,
+        "dividend_amount": None,     # nominal per lembar (cash dividend terakhir)
+        "dividend_rate": None,       # dividen tahunan per lembar
+        "dividend_yield": None,      # persen (mengikuti konvensi yfinance)
+        "currency": None,
+        "sumber": "yfinance",
+    }
+
+    def _f(v):
+        try:
+            return float(v) if v is not None and pd.notna(v) else None
+        except (TypeError, ValueError):
+            return None
+
+    def _epoch_to_iso(v):
+        try:
+            if v is None:
+                return None
+            return datetime.fromtimestamp(int(v), tz=timezone.utc).date().isoformat()
+        except (TypeError, ValueError, OSError):
+            return None
+
+    try:
+        ticker = yf.Ticker(get_yf_symbol(symbol_upper, market_clean))
+
+        # 1. Tanggal dari ticker.calendar (paling rapi: objek date langsung).
+        try:
+            cal = ticker.calendar
+            if isinstance(cal, dict):
+                ex = cal.get("Ex-Dividend Date")
+                if ex is not None:
+                    result["ex_dividend_date"] = ex.isoformat() if hasattr(ex, "isoformat") else str(ex)
+                pay = cal.get("Dividend Date")
+                if pay is not None:
+                    result["dividend_payment_date"] = pay.isoformat() if hasattr(pay, "isoformat") else str(pay)
+        except Exception as e:
+            logger.warning(f"calendar dividen {symbol_upper}: {e}")
+
+        # 2. Nominal/rate/yield + fallback tanggal dari .info (epoch detik).
+        try:
+            info = ticker.info or {}
+            result["dividend_amount"] = _f(info.get("lastDividendValue"))
+            result["dividend_rate"]   = _f(info.get("dividendRate"))
+            result["dividend_yield"]  = _f(info.get("dividendYield"))
+            result["currency"]        = info.get("financialCurrency") or info.get("currency")
+            if not result["ex_dividend_date"]:
+                result["ex_dividend_date"] = _epoch_to_iso(info.get("exDividendDate"))
+            if not result["dividend_payment_date"]:
+                result["dividend_payment_date"] = _epoch_to_iso(info.get("dividendDate"))
+        except Exception as e:
+            logger.warning(f"info dividen {symbol_upper}: {e}")
+
+    except Exception as e:
+        logger.error(f"Gagal mengambil agenda dividen untuk {symbol_upper}: {e}")
+
+    _yf_dividend_cache[cache_key] = (now, result)
+    return result
+
+
 def compute_rally_streak(candles: list[dict]) -> dict:
     """
     Menghitung "rally streak": jumlah candle harian berturut-turut (dari yang
@@ -1005,6 +1094,31 @@ async def get_earnings_schedule(
 
     loop = asyncio.get_running_loop()
     info = await loop.run_in_executor(None, fetch_earnings_info, kode_upper, saham_obj.market)
+    return info
+
+
+@router.get("/saham/{kode}/dividen")
+@router.get("/data/saham/{kode}/dividen")
+async def get_dividend_events(
+    kode: str,
+    market: str | None = None,
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Agenda korporasi (jadwal dividen: ex-dividen & pembayaran) yang bisa
+    menggerakkan harga saham selain rilis laporan keuangan. `market` opsional —
+    kalau tidak dikirim, ditebak dari DB lalu default non-IDX (US) supaya saham
+    hasil Search tetap dapat data tanpa harus terdaftar di watchlist.
+    """
+    kode_upper = kode.strip().upper()
+    resolved_market = market
+    if not resolved_market:
+        res = await db.execute(select(Saham).where(Saham.kode == kode_upper))
+        saham_obj = res.scalar_one_or_none()
+        resolved_market = saham_obj.market if saham_obj else "NASDAQ"
+
+    loop = asyncio.get_running_loop()
+    info = await loop.run_in_executor(None, fetch_dividend_events, kode_upper, resolved_market)
     return info
 
 

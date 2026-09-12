@@ -45,6 +45,8 @@ enum APIEndpoint {
     case fundamental(symbol: String, market: String?)
     /// Narasi kualitatif "business moat" (di-generate LLM lokal)
     case moat(symbol: String, market: String?)
+    /// Agenda dividen (ex-dividen & pembayaran) — event penggerak harga
+    case dividendEvents(symbol: String, market: String?)
     /// Analisis kesehatan portofolio + narasi harian (POST body holdings)
     case analyzePortfolio
 
@@ -112,6 +114,12 @@ enum APIEndpoint {
                 p += "?market=\(enc)"
             }
             return p
+        case .dividendEvents(let s, let market):
+            var p = "/saham/\(s)/dividen"
+            if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                p += "?market=\(enc)"
+            }
+            return p
         case .analyzePortfolio:                return "/portfolio/analyze"
         }
     }
@@ -157,14 +165,11 @@ final class APIClient {
 
     private static let candidateURLs = [
         // localhost lebih dulu supaya iOS Simulator langsung menjangkau backend
-        // lokal (uvicorn di Mac) tanpa Tailscale/LAN.
+        // lokal (uvicorn di Mac)
         "http://localhost:8080",
         "http://127.0.0.1:8080",
-        "http://100.121.215.111:8080",
-        "http://100.118.29.16:8080",
-        "http://100.70.203.11:8080",
     ]
-    private static let fallbackURL = "http://192.168.0.112:8080"
+    private static let fallbackURL = "http://localhost:8080"
 
     static func resolveBaseURL() async -> String {
         if let cached = resolvedBaseURL { return cached }

@@ -91,7 +91,9 @@ struct FundamentalsCard: View {
             metricRow("PER (trailing)", value: ratio(f.trailingPE), verdict: f.valuationVerdict)
             metricRow("PER (forward)",  value: ratio(f.forwardPE))
             metricRow("PBV",            value: ratio(f.pbv))
-            metricRow("Dividend Yield", value: percent(f.dividendYield))
+            // Dividend yield dari yfinance SUDAH dalam persen (mis. 5.5 = 5,5%) —
+            // jangan dikali 100 seperti ROE/margin yang berupa desimal.
+            metricRow("Dividend Yield", value: percentDirect(f.dividendYield))
             metricRow("Market Cap",     value: money(f.marketCap, currency: f.currency))
         }
     }
@@ -283,6 +285,12 @@ struct FundamentalsCard: View {
     private func percent(_ v: Double?) -> String {
         guard let v else { return "-" }
         return String(format: "%.1f%%", v * 100)
+    }
+
+    /// Untuk nilai yang SUDAH dalam satuan persen (mis. dividend yield yfinance).
+    private func percentDirect(_ v: Double?) -> String {
+        guard let v else { return "-" }
+        return String(format: "%.2f%%", v)
     }
 
     /// Nominal ringkas dengan simbol mata uang (Rp untuk IDR, $ untuk USD).

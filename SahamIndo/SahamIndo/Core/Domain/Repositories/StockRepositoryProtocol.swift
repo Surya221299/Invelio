@@ -27,6 +27,7 @@ protocol StockDetailRepositoryProtocol {
     func fetchAnalystRatings(symbol: String, market: String?) async throws -> AnalystRatings
     func fetchFundamentals(symbol: String, market: String?) async throws -> CompanyFundamentals
     func fetchMoat(symbol: String, market: String?) async throws -> MoatInsight
+    func fetchDividendEvents(symbol: String, market: String?) async throws -> DividendEvents
 }
 
 // MARK: - Chart / Candle Data
