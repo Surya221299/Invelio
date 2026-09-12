@@ -229,7 +229,7 @@ struct PortfolioChartSectionView: View {
                 containerBackgroundColor: .clear,
                 customAreaGradientStops:  areaGradientStops
             )
-            .frame(height: 180)
+            .frame(height: 135)
             .background(
                 GeometryReader { geo in
                     Color.clear
@@ -792,14 +792,40 @@ struct PortfolioTimeRangeSelectorView<VM: ChartViewModelProtocol>: View {
         return ranges
     }
 
+    @Namespace private var animation
+
     var body: some View {
-        Picker("Range", selection: $chartVM.selectedRange) {
+        HStack(spacing: 2) {
             ForEach(availableRanges, id: \.self) { range in
-                Text(range.rawValue).tag(range)
+                let isSelected = chartVM.selectedRange == range
+                Button {
+                    guard chartVM.selectedRange != range else { return }
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        chartVM.selectedRange = range
+                    }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } label: {
+                    ZStack {
+                        if isSelected {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(tintColor)
+                                .matchedGeometryEffect(id: "activePortfolioRange", in: animation)
+                                .shadow(color: tintColor.opacity(0.35), radius: 3, y: 1)
+                        }
+                        Text(range.rawValue)
+                            .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                            .foregroundColor(isSelected ? .black : .white.opacity(0.70))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
-        .pickerStyle(.segmented)
-        .tint(tintColor)
+        .padding(2)
+        .frame(height: 24)
+        .background(Color.black.opacity(0.25))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
         .onChange(of: chartVM.selectedRange) { _, _ in
             onRangeChange()
             Task { await chartVM.fetchChartData() }

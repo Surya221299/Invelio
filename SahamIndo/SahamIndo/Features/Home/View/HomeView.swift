@@ -60,11 +60,7 @@ struct HomeView: View {
 
                 WatchlistTabSelectorView(store: watchlistStore)
                     .padding(.top, -6)
-
-                Divider()
-                    .frame(height: 1.5)
-                    .background(Color.PrimaryYellow)
-                    .padding(.horizontal)
+                    .padding(.bottom, 4)
 
                 if watchlistStore.activeID == "crypto" {
                     CryptoWatchlistSectionView()
