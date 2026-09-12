@@ -36,7 +36,8 @@ struct StockRowView: View {
                     SentimentPillView(sentiment: stock.sentiment, size: .small)
                 }
                 Text(stock.name ?? "-").font(.caption).foregroundColor(.secondary).lineLimit(1)
-                SentimentBarView(sentiment: stock.sentiment).frame(width: DesignSize.sentimentBarMaxWidth)
+                SentimentBarView(sentiment: stock.sentiment)
+                    .frame(width: DesignSize.sentimentBarWidth, alignment: .leading)
                 // Badge pre-market/after-hours — cuma muncul untuk NASDAQ/NYSE/ETF
                 // dan cuma kalau memang sedang dalam sesi itu (lihat ExtendedHoursBadgeView).
                 ExtendedHoursBadgeView(data: extendedHours, style: .compact)

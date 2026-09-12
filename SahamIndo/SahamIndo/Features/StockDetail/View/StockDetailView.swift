@@ -119,6 +119,7 @@ struct StockDetailView: View {
                         accentColor:       accentColor,
                         displayIsPositive: displayIsPositive,
                         market:            market,
+                        lineWidth:         1.0,
                         analystTargets:    viewModel.analystRatings?.history ?? []
                     )
                     .frame(height: 230)
@@ -151,7 +152,7 @@ struct StockDetailView: View {
                     Divider().padding(.horizontal)
 
                     AIInsightCard(symbol: viewModel.item.symbol)
-                        .padding(.horizontal)
+                        .padding(.horizontal, 0)
                         .animation(.easeInOut(duration: 0.3), value: viewModel.item.symbol)
 
                     EarningsRallyCard(
@@ -428,8 +429,8 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
 
     /// When false, no area shape gradient fill is drawn under the line (pure line chart).
     var showAreaGradient: Bool = true
-    /// Stroke width for chart lines. Default is 0.6.
-    var lineWidth: CGFloat = 0.6
+    /// Stroke width for chart lines. Default is 1.0.
+    var lineWidth: CGFloat = 1.0
     /// Background fill for the chart container box. Default is Color.appCardBackground.
     /// Set to .clear when the chart is embedded inside another styled card (e.g. PortfolioSummaryCardView).
     var containerBackgroundColor: Color? = Color.appCardBackground
@@ -784,15 +785,22 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
             // ==== Overlay — TIDAK di-clip (dot & shadow bebas di tepi) ====
 
             // Max / Min labels
+            let hasMinMaxBg = containerBackgroundColor != .clear
             Text("Max \(formatPrice(maxP, market: market))")
-                .font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
-                .padding(.horizontal, 4).padding(.vertical, 2)
-                .background(Color.appElevatedBackground.opacity(0.85)).cornerRadius(4)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(hasMinMaxBg ? .secondary : .white.opacity(0.70))
+                .padding(.horizontal, hasMinMaxBg ? 4 : 0)
+                .padding(.vertical, hasMinMaxBg ? 2 : 0)
+                .background(hasMinMaxBg ? Color.appElevatedBackground.opacity(0.85) : Color.clear)
+                .cornerRadius(4)
                 .position(x: chartSize.width - 34, y: yMax - 10)
             Text("Min \(formatPrice(minP, market: market))")
-                .font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
-                .padding(.horizontal, 4).padding(.vertical, 2)
-                .background(Color.appCardBackground.opacity(0.85)).cornerRadius(4)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(hasMinMaxBg ? .secondary : .white.opacity(0.70))
+                .padding(.horizontal, hasMinMaxBg ? 4 : 0)
+                .padding(.vertical, hasMinMaxBg ? 2 : 0)
+                .background(hasMinMaxBg ? Color.appCardBackground.opacity(0.85) : Color.clear)
+                .cornerRadius(4)
                 .position(x: chartSize.width - 34, y: yMin + 10)
 
             // Active price dot & dashed line — 1D (pulse saat market aktif)
