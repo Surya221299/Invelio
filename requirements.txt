@@ -63,6 +63,7 @@ googlenewsdecoder>=0.1.7        # Decode URL redirect Google News -> URL artikel
 # ============================================================
 pandas>=2.2.0,<3.0.0
 numpy>=2.0.0,<3.0.0
+pytz>=2024.1
 
 # ============================================================
 # Configuration & Environment
