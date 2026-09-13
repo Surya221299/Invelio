@@ -144,3 +144,16 @@ async def hapus_watchlist(kode: str):
     if not updated:
         raise HTTPException(status_code=404, detail=f"Saham '{kode_clean}' tidak ditemukan.")
     return {"kode": kode_clean, "is_watchlist": False}
+
+
+@router.get("/saham/{kode}/watchlist")
+async def status_watchlist(kode: str, db: AsyncSession = Depends(get_db_session)):
+    """
+    Cek status apakah suatu saham ada di watchlist aktif (is_watchlist=True).
+    """
+    kode_clean = kode.strip().upper()
+    res = await db.execute(select(Saham.is_watchlist, Saham.market).where(Saham.kode == kode_clean))
+    row = res.first()
+    if row:
+        return {"kode": kode_clean, "is_watchlist": bool(row[0]), "market": row[1]}
+    return {"kode": kode_clean, "is_watchlist": False, "market": None}

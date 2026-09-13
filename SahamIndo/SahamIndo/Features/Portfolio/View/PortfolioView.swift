@@ -110,8 +110,12 @@ struct PortfolioSummaryCardView: View {
 
     private let accent = Color.AccentGold
     private let green  = Color.ProfitGreen
-    private let red    = Color.LossRed
-    private let cardBg = Color.appCardBackground
+    private let red    = Color.PortfolioLossRed
+    private let cardGradient = LinearGradient(
+        colors: [Color(hex: "665EBF"), Color(hex: "3D3788")],
+        startPoint: .top,
+        endPoint: .bottom
+    )
 
     // MARK: - Live values (mengikuti posisi drag di chart, fallback ke summary asli)
 
@@ -146,14 +150,14 @@ struct PortfolioSummaryCardView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Total Assets")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.75))
                 // Saat men-scrub chart, tampilkan nilai portofolio pada titik yang
                 // dipilih (mengikuti crosshair). Di luar drag, kembalikan ke
                 // animator live (roll/flash dari nilai server).
                 if isDragging {
                     Text(formatIDR(displayedValue))
                         .font(.system(size: 30, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
+                        .foregroundColor(.white)
                 } else {
                     PortfolioValueAnimator()
                 }
@@ -169,7 +173,7 @@ struct PortfolioSummaryCardView: View {
                     }
                     .foregroundColor(isPos ? green : red)
                     .padding(.horizontal, 5).padding(.vertical, 2)
-                    .background((isPos ? green : red).opacity(0.12))
+                    .background((isPos ? green : red).opacity(0.18))
                     .clipShape(Capsule())
                 }
             }
@@ -182,9 +186,9 @@ struct PortfolioSummaryCardView: View {
         .padding(.horizontal, 16)
         .padding(.top, 16)
         .padding(.bottom, 8)
-        .background(cardBg)
+        .background(cardGradient)
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.12), lineWidth: 1))
         .padding(.horizontal, 16)
     }
 }
@@ -202,33 +206,51 @@ struct PortfolioChartSectionView: View {
     @StateObject private var chartVM = PortfolioChartViewModel()
     @State private var chartSize:     CGSize = .zero
 
-    private let orange = Color.orange
+    private let orange = Color.PortfolioOrange
+    private let areaGradientStops: [Gradient.Stop] = [
+        .init(color: Color.PortfolioOrange.opacity(0.30), location: 0.0),
+        .init(color: Color.PortfolioOrange.opacity(0.0),  location: 0.88)
+    ]
+
+    private var isEmptyPortfolio: Bool {
+        let activeItems = items.filter { $0.quantity > 0 }
+        let currentTotal = activeItems.reduce(0) { $0 + $1.value }
+        return currentTotal == 0
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ChartCanvasView(
-                chartVM:           chartVM,
-                selectedPoint:     $selectedPoint,
-                isDragging:        $isDragging,
-                chartSize:         $chartSize,
-                accentColor:       orange,
-                displayIsPositive: true,
-                fixedColor:        orange,
-                revealOnFirstLoad: true,
-                useHighPriorityDrag: true
-            )
-            .frame(height: 180)
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onAppear { chartSize = geo.size }
-                        .onChange(of: geo.size) { _, s in chartSize = s }
-                }
-            )
+            if isEmptyPortfolio {
+                emptyFlatLineChart
+            } else {
+                ChartCanvasView(
+                    chartVM:                  chartVM,
+                    selectedPoint:            $selectedPoint,
+                    isDragging:               $isDragging,
+                    chartSize:                $chartSize,
+                    accentColor:              orange,
+                    displayIsPositive:        true,
+                    fixedColor:               orange,
+                    revealOnFirstLoad:        true,
+                    useHighPriorityDrag:      true,
+                    showAreaGradient:         true,
+                    lineWidth:                1.0,
+                    containerBackgroundColor: .clear,
+                    customAreaGradientStops:  areaGradientStops
+                )
+                .frame(height: 135)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear { chartSize = geo.size }
+                            .onChange(of: geo.size) { _, s in chartSize = s }
+                    }
+                )
 
-            if !chartVM.dataPoints.isEmpty {
-                XAxisAnimatedLabels(chartVM: chartVM, chartSize: chartSize)
-                    .padding(.top, -10)
+                if !chartVM.dataPoints.isEmpty {
+                    XAxisAnimatedLabels(chartVM: chartVM, chartSize: chartSize)
+                        .padding(.top, -10)
+                }
             }
 
             PortfolioTimeRangeSelectorView(chartVM: chartVM, holdings: holdings, onRangeChange: {
@@ -236,6 +258,7 @@ struct PortfolioChartSectionView: View {
                 isDragging    = false
             }, tintColor: orange)
         }
+        .animation(.easeInOut(duration: 0.3), value: isEmptyPortfolio)
         .task { chartVM.update(items: items, holdings: holdings) }
         .onChange(of: items)    { _, newItems    in chartVM.update(items: newItems, holdings: holdings) }
         .onChange(of: holdings) { _, newHoldings in chartVM.update(items: items, holdings: newHoldings) }
@@ -243,6 +266,46 @@ struct PortfolioChartSectionView: View {
             guard newSize.width > 0, !chartVM.dataPoints.isEmpty else { return }
             Task { await chartVM.fetchChartData() }
         }
+    }
+
+    private var emptyFlatLineChart: some View {
+        GeometryReader { geo in
+            let midY = geo.size.height / 2
+            ZStack(alignment: .leading) {
+                // Area gradient di bawah garis datar
+                Path { path in
+                    path.move(to: CGPoint(x: 0, y: midY))
+                    path.addLine(to: CGPoint(x: geo.size.width, y: midY))
+                    path.addLine(to: CGPoint(x: geo.size.width, y: geo.size.height))
+                    path.addLine(to: CGPoint(x: 0, y: geo.size.height))
+                    path.closeSubpath()
+                }
+                .fill(
+                    LinearGradient(
+                        stops: [
+                            .init(color: orange.opacity(0.20), location: 0.0),
+                            .init(color: orange.opacity(0.0),  location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                // Garis datar tepat di tengah vertikal (center vertical)
+                Path { path in
+                    path.move(to: CGPoint(x: 0, y: midY))
+                    path.addLine(to: CGPoint(x: geo.size.width, y: midY))
+                }
+                .stroke(orange, lineWidth: 1.0)
+
+                // Titik kecil di ujung kanan garis agar serasi dengan chart aktif
+                Circle()
+                    .fill(orange)
+                    .frame(width: 5, height: 5)
+                    .position(x: max(geo.size.width - 4, 0), y: midY)
+            }
+        }
+        .frame(height: 135)
     }
 }
 
@@ -726,7 +789,7 @@ struct PortfolioTimeRangeSelectorView<VM: ChartViewModelProtocol>: View {
     @ObservedObject var chartVM: VM
     let holdings:       [Holding]
     let onRangeChange:  () -> Void
-    var tintColor:      Color = Color.orange
+    var tintColor:      Color = Color.VibrantOrange
 
     // MARK: - Computed: ranges yang relevan berdasarkan histori holding
 
@@ -780,14 +843,40 @@ struct PortfolioTimeRangeSelectorView<VM: ChartViewModelProtocol>: View {
         return ranges
     }
 
+    @Namespace private var animation
+
     var body: some View {
-        Picker("Range", selection: $chartVM.selectedRange) {
+        HStack(spacing: 2) {
             ForEach(availableRanges, id: \.self) { range in
-                Text(range.rawValue).tag(range)
+                let isSelected = chartVM.selectedRange == range
+                Button {
+                    guard chartVM.selectedRange != range else { return }
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        chartVM.selectedRange = range
+                    }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } label: {
+                    ZStack {
+                        if isSelected {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(tintColor)
+                                .matchedGeometryEffect(id: "activePortfolioRange", in: animation)
+                                .shadow(color: tintColor.opacity(0.35), radius: 3, y: 1)
+                        }
+                        Text(range.rawValue)
+                            .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                            .foregroundColor(isSelected ? .black : .white.opacity(0.70))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
-        .pickerStyle(.segmented)
-        .tint(tintColor)
+        .padding(2)
+        .frame(height: 24)
+        .background(Color.black.opacity(0.25))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
         .onChange(of: chartVM.selectedRange) { _, _ in
             onRangeChange()
             Task { await chartVM.fetchChartData() }

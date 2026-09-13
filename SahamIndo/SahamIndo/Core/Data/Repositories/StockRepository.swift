@@ -58,6 +58,21 @@ final class StockDetailRepository: StockDetailRepositoryProtocol {
         let dto = try await APIClient.get(.analystRatings(symbol: symbol, market: market), as: AnalystRatingsDTO.self)
         return StockMapper.toAnalystRatings(dto)
     }
+
+    func fetchFundamentals(symbol: String, market: String?) async throws -> CompanyFundamentals {
+        let dto = try await APIClient.get(.fundamental(symbol: symbol, market: market), as: FundamentalDTO.self)
+        return StockMapper.toFundamentals(dto)
+    }
+
+    func fetchMoat(symbol: String, market: String?) async throws -> MoatInsight {
+        let dto = try await APIClient.get(.moat(symbol: symbol, market: market), as: MoatDTO.self)
+        return StockMapper.toMoat(dto)
+    }
+
+    func fetchDividendEvents(symbol: String, market: String?) async throws -> DividendEvents {
+        let dto = try await APIClient.get(.dividendEvents(symbol: symbol, market: market), as: DividendEventsDTO.self)
+        return StockMapper.toDividendEvents(dto)
+    }
 }
 
 // MARK: - ChartRepository

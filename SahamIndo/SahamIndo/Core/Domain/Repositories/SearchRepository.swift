@@ -28,6 +28,9 @@ protocol SearchRepositoryProtocol {
 
     /// Hapus saham dari watchlist aktif scheduler.
     func removeFromWatchlist(kode: String) async throws -> Bool
+
+    /// Cek status apakah saham ada di watchlist.
+    func getWatchlistStatus(kode: String) async throws -> Bool
 }
 
 // MARK: - Implementation
@@ -66,5 +69,13 @@ final class SearchRepository: SearchRepositoryProtocol {
             as: WatchlistStatusDTO.self
         )
         return !dto.is_watchlist  // false = berhasil dikeluarkan
+    }
+
+    func getWatchlistStatus(kode: String) async throws -> Bool {
+        let dto = try await APIClient.request(
+            .watchlistStatus(kode: kode),
+            as: WatchlistStatusDTO.self
+        )
+        return dto.is_watchlist
     }
 }

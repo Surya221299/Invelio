@@ -34,6 +34,8 @@ enum APIEndpoint {
     case addWatchlist(kode: String)
     /// Hapus saham dari watchlist
     case removeWatchlist(kode: String)
+    /// Status watchlist suatu saham
+    case watchlistStatus(kode: String)
     /// Perkiraan jadwal rilis laporan keuangan (earnings) per emiten
     case earnings(symbol: String)
     /// Rally streak (hari hijau berturut-turut) per emiten
@@ -41,6 +43,12 @@ enum APIEndpoint {
     /// Perkiraan analis (konsensus price target, distribusi rekomendasi,
     /// riwayat rating action) per emiten
     case analystRatings(symbol: String, market: String?)
+    /// Ringkasan fundamental emiten (valuasi, profitabilitas, kesehatan, growth)
+    case fundamental(symbol: String, market: String?)
+    /// Narasi kualitatif "business moat" (di-generate LLM lokal)
+    case moat(symbol: String, market: String?)
+    /// Agenda dividen (ex-dividen & pembayaran) — event penggerak harga
+    case dividendEvents(symbol: String, market: String?)
     /// Analisis kesehatan portofolio + narasi harian (POST body holdings)
     case analyzePortfolio
 
@@ -88,10 +96,29 @@ enum APIEndpoint {
             return path
         case .addWatchlist(let kode):          return "/api/saham/\(kode)/watchlist"
         case .removeWatchlist(let kode):       return "/api/saham/\(kode)/watchlist"
+        case .watchlistStatus(let kode):       return "/api/saham/\(kode)/watchlist"
         case .earnings(let s):                 return "/saham/\(s)/earnings"
         case .rallyStreak(let s):              return "/saham/\(s)/rally-streak"
         case .analystRatings(let s, let market):
             var p = "/saham/\(s)/analis"
+            if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                p += "?market=\(enc)"
+            }
+            return p
+        case .fundamental(let s, let market):
+            var p = "/saham/\(s)/fundamentals"
+            if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                p += "?market=\(enc)"
+            }
+            return p
+        case .moat(let s, let market):
+            var p = "/saham/\(s)/moat"
+            if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                p += "?market=\(enc)"
+            }
+            return p
+        case .dividendEvents(let s, let market):
+            var p = "/saham/\(s)/dividen"
             if let market, let enc = market.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
                 p += "?market=\(enc)"
             }
@@ -141,14 +168,12 @@ final class APIClient {
 
     private static let candidateURLs = [
         // localhost lebih dulu supaya iOS Simulator langsung menjangkau backend
-        // lokal (uvicorn di Mac) tanpa Tailscale/LAN.
+        // lokal (uvicorn di Mac)
         "http://localhost:8080",
         "http://127.0.0.1:8080",
-        "http://100.121.215.111:8080",
-        "http://100.118.29.16:8080",
-        "http://100.70.203.11:8080",
+        "http://192.168.0.128:8080",
     ]
-    private static let fallbackURL = "http://192.168.0.112:8080"
+    private static let fallbackURL = "http://localhost:8080"
 
     static func resolveBaseURL() async -> String {
         if let cached = resolvedBaseURL { return cached }

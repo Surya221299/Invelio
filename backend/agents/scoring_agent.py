@@ -69,7 +69,7 @@ from langgraph.graph import END, START, StateGraph
 from loguru import logger
 from sqlalchemy import func, select
 
-from backend.config import settings
+from backend.config import PROJECT_ROOT, settings
 from backend.utils.ticker import get_yf_symbol, normalize_market
 from backend.utils.text import strip_alasan_noise
 from backend.db.postgres import (
@@ -433,24 +433,24 @@ SECTOR_STATS = {}
 EMITEN_STATS = {}
 
 try:
-    stats_path = "/Users/satriabaladewaharahap/Downloads/SAHAMAPP/backend/scratch/sector_historical_stats.json"
-    if os.path.exists(stats_path):
-        with open(stats_path, "r") as f:
+    stats_path = PROJECT_ROOT / "backend" / "scratch" / "sector_historical_stats.json"
+    if stats_path.exists():
+        with open(stats_path, "r", encoding="utf-8") as f:
             SECTOR_STATS = json.load(f)
         logger.info(f"✅ Loaded sector historical stats from {stats_path}")
     else:
-        logger.warning(f"⚠️ Sector historical stats file not found at {stats_path}, using defaults")
+        logger.debug(f"Sector historical stats file not found at {stats_path}, using defaults")
 except Exception as e:
     logger.error(f"❌ Error loading sector historical stats: {e}")
 
 try:
-    emiten_stats_path = "/Users/satriabaladewaharahap/Downloads/SAHAMAPP/backend/scratch/emiten_historical_stats.json"
-    if os.path.exists(emiten_stats_path):
-        with open(emiten_stats_path, "r") as f:
+    emiten_stats_path = PROJECT_ROOT / "backend" / "scratch" / "emiten_historical_stats.json"
+    if emiten_stats_path.exists():
+        with open(emiten_stats_path, "r", encoding="utf-8") as f:
             EMITEN_STATS = json.load(f)
         logger.info(f"✅ Loaded emiten historical stats from {emiten_stats_path}")
     else:
-        logger.warning(f"⚠️ Emiten historical stats file not found at {emiten_stats_path}, using defaults")
+        logger.debug(f"Emiten historical stats file not found at {emiten_stats_path}, using defaults")
 except Exception as e:
     logger.error(f"❌ Error loading emiten historical stats: {e}")
 

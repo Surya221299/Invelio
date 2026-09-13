@@ -19,14 +19,9 @@ final class ChatViewModel: ObservableObject {
     private let chatRepository: ChatRepositoryProtocol
     private let historyLimit = 10
 
-    private static let welcomeMessage = ChatMessage(
-        role: .assistant,
-        content: "Halo! Saya adalah SahamIndo AI Assistant. Tanyakan apa saja mengenai rekomendasi emiten saham IDX atau analisis makroekonomi."
-    )
-
     init(chatRepository: ChatRepositoryProtocol) {
         self.chatRepository = chatRepository
-        messages = [Self.welcomeMessage]
+        messages = []
     }
 
     func send(_ text: String) async {
@@ -66,7 +61,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     func clear() {
-        messages  = [Self.welcomeMessage]
+        messages  = []
         inputText = ""
     }
 }

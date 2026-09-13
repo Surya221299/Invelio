@@ -167,26 +167,16 @@ final class PortfolioChartViewModel: ObservableObject, ChartViewModelProtocol {
         }
     }
 
-    // MARK: - 1W: Hari Bursa Saja
+    // MARK: - 1W: Hari Bursa Saja (3 Titik per Hari: Open, Jam Tengah, Close)
 
-    /// Menghasilkan satu titik per hari bursa aktif IDX untuk 5 hari terakhir.
-    ///
-    /// ### Mengapa ini diperlukan
-    /// `walk()` lama membagi 7 hari kalender secara merata — titik-titik bisa
-    /// jatuh di Sabtu, Minggu, atau tanggal merah IDX.  `AxisTickGenerator`
-    /// memakai `firstIndexPerDay` yang langsung membaca tanggal dari `data`,
-    /// sehingga label X-axis menampilkan hari libur tersebut.
-    ///
-    /// `StockDetailView` tidak memiliki masalah ini karena data candle real dari
-    /// API IDX hanya berisi hari perdagangan.  Di sini kita replika perilaku
-    /// itu: enumerate mundur dari hari bursa aktif terakhir, kumpulkan tepat
-    /// 5 hari bursa, hasilkan satu titik per hari.
+    /// Menghasilkan 3 titik per hari bursa aktif IDX (Open 09:00, Jam Tengah 12:00, Close 15:50)
+    /// untuk 5 hari bursa terakhir.
     ///
     /// ### Penanganan hari libur / weekend
     /// `IDXTradingCalendar.lastActiveTradingDay` mundur ke hari bursa terakhir
-    /// jika hari ini libur/weekend.  `previousTradingDay(before:)` lalu mundur
+    /// jika hari ini libur/weekend. `previousTradingDay(before:)` lalu mundur
     /// satu hari bursa per langkah — tidak pernah mendarat di Sabtu/Minggu/
-    /// tanggal merah.  Semua titik bertanggal hari bursa nyata.
+    /// tanggal merah. Semua titik bertanggal hari bursa nyata.
     private static func oneWeekTradingDays(currentTotal: Double, startValue: Double, holdings: [Holding]) -> [StockDataPoint] {
         let cal      = IDXTradingCalendar.jakartaCalendar
         let now      = Date()
@@ -210,33 +200,70 @@ final class PortfolioChartViewModel: ObservableObject, ChartViewModelProtocol {
             return [point(date: now, value: currentTotal)]
         }
 
-        let count  = tradingDays.count
-        var values = [Double](repeating: 0, count: count)
-        values[count - 1] = currentTotal
+        // Kumpulkan titik waktu per hari bursa aktif:
+        // 1. Open       : 09:00 WIB
+        // 2. Jam Tengah : 12:00 WIB
+        // 3. Close      : 15:50 WIB
+        var pointDates: [Date] = []
+        for (idx, day) in tradingDays.enumerated() {
+            let isLastDay = (idx == tradingDays.count - 1)
+            let isToday   = cal.isDate(day, inSameDayAs: now)
 
-        var rng = SeededRandom(seed: UInt64(abs(currentTotal)) &+ UInt64(count) &+ 1)
-        for i in stride(from: count - 2, through: 0, by: -1) {
-            let progress = Double(i) / Double(count - 1)
+            let openDate  = cal.date(bySettingHour: 9,  minute: 0,  second: 0, of: day) ?? day
+            let midDate   = cal.date(bySettingHour: 12, minute: 0,  second: 0, of: day) ?? day
+            let closeDate = cal.date(bySettingHour: 15, minute: 50, second: 0, of: day) ?? day
+
+            if isLastDay && isToday && IDXTradingCalendar.isTradingDay(now) {
+                // Hari ini dan bursa IDX sedang dalam sesi perdagangan aktif
+                let nowH = cal.component(.hour,   from: now)
+                let nowM = cal.component(.minute, from: now)
+                let totalMins = nowH * 60 + nowM
+
+                if totalMins < 9 * 60 {
+                    // Sebelum jam buka pasar: 1 titik open
+                    pointDates.append(openDate)
+                } else if totalMins < 12 * 60 {
+                    // Sesi 1 (09:00 s/d 12:00): open dan waktu sekarang
+                    pointDates.append(openDate)
+                    pointDates.append(now)
+                } else if totalMins < 15 * 60 + 50 {
+                    // Sesi 2 (12:00 s/d 15:50): open, jam tengah, dan waktu sekarang
+                    pointDates.append(openDate)
+                    pointDates.append(midDate)
+                    pointDates.append(now)
+                } else {
+                    // Sesi hari ini sudah selesai (lewat 15:50)
+                    pointDates.append(openDate)
+                    pointDates.append(midDate)
+                    pointDates.append(closeDate)
+                }
+            } else {
+                // Hari bursa yang sudah selesai / di luar jam bursa: 3 titik lengkap
+                pointDates.append(openDate)
+                pointDates.append(midDate)
+                pointDates.append(closeDate)
+            }
+        }
+
+        let totalPoints = pointDates.count
+        guard totalPoints > 1 else {
+            return [point(date: now, value: currentTotal)]
+        }
+
+        var values = [Double](repeating: 0, count: totalPoints)
+        values[totalPoints - 1] = currentTotal
+
+        var rng = SeededRandom(seed: UInt64(abs(currentTotal)) &+ UInt64(totalPoints) &+ 1)
+        for i in stride(from: totalPoints - 2, through: 0, by: -1) {
+            let progress = Double(i) / Double(totalPoints - 1)
             let trend    = startValue + (currentTotal - startValue) * progress
-            let noise    = trend * 0.012 * rng.nextGaussian()
+            let noise    = trend * 0.007 * rng.nextGaussian()
             values[i]    = max(trend + noise, 1)
         }
         values[0] = startValue
 
-        // Satu titik per hari bursa; jam di-set ke 15:50 (penutupan) kecuali
-        // hari terakhir yang sedang berjalan (gunakan waktu sekarang).
-        return tradingDays.enumerated().map { idx, day in
-            let isLastDay = (idx == count - 1)
-            let isToday   = cal.isDate(day, inSameDayAs: now)
-            let date: Date
-            if isLastDay && isToday && IDXTradingCalendar.isTradingDay(now) {
-                // Sesi sedang berjalan: gunakan waktu sekarang
-                date = now
-            } else {
-                // Sesi selesai: tandai jam penutupan 15:50 WIB
-                date = cal.date(bySettingHour: 15, minute: 50, second: 0, of: day) ?? day
-            }
-            return point(date: date, value: values[idx])
+        return pointDates.enumerated().map { idx, date in
+            point(date: date, value: values[idx])
         }
     }
 

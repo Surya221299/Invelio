@@ -10,20 +10,43 @@ import SwiftUI
 struct ChatbotView: View {
 
     @EnvironmentObject private var vm: ChatViewModel
+    @EnvironmentObject private var router: Router
+    @FocusState private var isInputFocused: Bool
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                messageList
+                if vm.messages.isEmpty {
+                    welcomeView
+                } else {
+                    messageList
+                }
                 inputBar
             }
+            .animation(.easeInOut(duration: 0.3), value: vm.messages.isEmpty)
             .background(Color.DarkPurpleAppBackground.ignoresSafeArea())
             .navigationTitle("AI Assistant")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Hapus", action: vm.clear)
-                        .font(Font.footnote).foregroundColor(Color.PrimaryYellow)
+                    if !vm.messages.isEmpty {
+                        Button("Hapus", action: vm.clear)
+                            .font(Font.footnote).foregroundColor(Color.PrimaryYellow)
+                    }
+                }
+            }
+            .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    isInputFocused = true
+                }
+            }
+            .onChange(of: router.selectedTab) { _, newTab in
+                if newTab == "chatbot" {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        isInputFocused = true
+                    }
+                } else {
+                    isInputFocused = false
                 }
             }
         }
@@ -31,21 +54,45 @@ struct ChatbotView: View {
 
     // MARK: - Sub-views
 
+    private var welcomeView: some View {
+        VStack {
+            Spacer()
+            Text("How can I help you\nwith your investments today?")
+                .font(.system(size: 26, weight: .bold))
+                .foregroundColor(Color.SurfaceWhite)
+                .multilineTextAlignment(.center)
+                .lineSpacing(6)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 28)
+                .opacity(vm.inputText.isEmpty ? 1 : 0)
+                .scaleEffect(vm.inputText.isEmpty ? 1.0 : 0.95)
+                .animation(.easeInOut(duration: 0.25), value: vm.inputText.isEmpty)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            isInputFocused = false
+        }
+    }
+
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 12) {
                     ForEach(vm.messages) { msg in
-                        MessageBubble(message: msg)
-                            .id(msg.id)
+                        if !msg.content.isEmpty {
+                            MessageBubble(message: msg)
+                                .id(msg.id)
+                        }
                     }
-                    if vm.isLoading {
+                    if vm.isLoading && (vm.messages.last?.content.isEmpty ?? true) {
                         TypingIndicator()
                     }
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
             }
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: vm.messages.count) { _, _ in
                 if let last = vm.messages.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
@@ -59,6 +106,7 @@ struct ChatbotView: View {
             TextField("Tanya tentang saham IDX...", text: $vm.inputText, axis: .vertical)
                 .font(Font.subheadline)
                 .lineLimit(1...4)
+                .focused($isInputFocused)
                 .padding(10)
                 .background(Color.appCardBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -87,16 +135,36 @@ struct ChatbotView: View {
 private struct MessageBubble: View {
     let message: ChatMessage
     private var isUser: Bool { message.role == .user }
+
+    private let userBubbleGradient = LinearGradient(
+        colors: [Color(hex: "665EBF"), Color(hex: "3D3788")],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
+
     var body: some View {
-        HStack {
-            if isUser { Spacer(minLength: 40) }
-            Text(message.content)
-                .font(Font.footnote)
-                .foregroundColor(isUser ? .SurfaceWhite : .primary)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(isUser ? Color.PrimaryYellow : Color.appCardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-            if !isUser { Spacer(minLength: 40) }
+        if !message.content.isEmpty {
+            HStack {
+                if isUser { Spacer(minLength: 40) }
+                Text(message.content)
+                    .font(Font.footnote)
+                    .foregroundColor(isUser ? .SurfaceWhite : .primary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background {
+                        if isUser {
+                            userBubbleGradient
+                        } else {
+                            Color.appCardBackground
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(isUser ? Color.white.opacity(0.15) : Color.clear, lineWidth: 1)
+                    )
+                if !isUser { Spacer(minLength: 40) }
+            }
         }
     }
 }

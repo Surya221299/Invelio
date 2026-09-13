@@ -962,6 +962,95 @@ def fetch_earnings_info(symbol: str, market: str = "IDX") -> dict:
     return result
 
 
+_yf_dividend_cache = {}
+YF_DIVIDEND_CACHE_TTL = 6 * 3600  # 6 jam — jadwal dividen jarang berubah dalam sehari
+
+
+def fetch_dividend_events(symbol: str, market: str = "IDX") -> dict:
+    """
+    Mengambil agenda korporasi yang bisa menggerakkan harga saham SELAIN rilis
+    laporan keuangan — terutama jadwal DIVIDEN:
+      - Tanggal ex-dividen: mulai tanggal ini pembeli TIDAK lagi berhak atas
+        dividen, sehingga harga saham secara teoritis turun ~sebesar dividen.
+      - Tanggal pembayaran dividen (kalau tersedia; sering kosong untuk IDX).
+      - Nominal dividen per lembar terakhir + tingkat dividen tahunan + yield.
+
+    CATATAN: yfinance hanya andal untuk data dividen. Aksi korporasi lain untuk
+    emiten IDX (RUPS, stock split, rights issue, dsb.) tidak tersedia sebagai
+    event MENDATANG di yfinance, jadi tidak dimasukkan agar tidak menyesatkan.
+    """
+    symbol_upper = symbol.strip().upper()
+    market_clean = normalize_market(market)
+    cache_key = (symbol_upper, market_clean)
+    now = time.time()
+
+    if cache_key in _yf_dividend_cache:
+        cached_time, cached_data = _yf_dividend_cache[cache_key]
+        if now - cached_time < YF_DIVIDEND_CACHE_TTL:
+            return cached_data
+
+    result: dict[str, Any] = {
+        "kode_saham": symbol_upper,
+        "ex_dividend_date": None,
+        "dividend_payment_date": None,
+        "dividend_amount": None,     # nominal per lembar (cash dividend terakhir)
+        "dividend_rate": None,       # dividen tahunan per lembar
+        "dividend_yield": None,      # persen (mengikuti konvensi yfinance)
+        "currency": None,
+        "sumber": "yfinance",
+    }
+
+    def _f(v):
+        try:
+            return float(v) if v is not None and pd.notna(v) else None
+        except (TypeError, ValueError):
+            return None
+
+    def _epoch_to_iso(v):
+        try:
+            if v is None:
+                return None
+            return datetime.fromtimestamp(int(v), tz=timezone.utc).date().isoformat()
+        except (TypeError, ValueError, OSError):
+            return None
+
+    try:
+        ticker = yf.Ticker(get_yf_symbol(symbol_upper, market_clean))
+
+        # 1. Tanggal dari ticker.calendar (paling rapi: objek date langsung).
+        try:
+            cal = ticker.calendar
+            if isinstance(cal, dict):
+                ex = cal.get("Ex-Dividend Date")
+                if ex is not None:
+                    result["ex_dividend_date"] = ex.isoformat() if hasattr(ex, "isoformat") else str(ex)
+                pay = cal.get("Dividend Date")
+                if pay is not None:
+                    result["dividend_payment_date"] = pay.isoformat() if hasattr(pay, "isoformat") else str(pay)
+        except Exception as e:
+            logger.warning(f"calendar dividen {symbol_upper}: {e}")
+
+        # 2. Nominal/rate/yield + fallback tanggal dari .info (epoch detik).
+        try:
+            info = ticker.info or {}
+            result["dividend_amount"] = _f(info.get("lastDividendValue"))
+            result["dividend_rate"]   = _f(info.get("dividendRate"))
+            result["dividend_yield"]  = _f(info.get("dividendYield"))
+            result["currency"]        = info.get("financialCurrency") or info.get("currency")
+            if not result["ex_dividend_date"]:
+                result["ex_dividend_date"] = _epoch_to_iso(info.get("exDividendDate"))
+            if not result["dividend_payment_date"]:
+                result["dividend_payment_date"] = _epoch_to_iso(info.get("dividendDate"))
+        except Exception as e:
+            logger.warning(f"info dividen {symbol_upper}: {e}")
+
+    except Exception as e:
+        logger.error(f"Gagal mengambil agenda dividen untuk {symbol_upper}: {e}")
+
+    _yf_dividend_cache[cache_key] = (now, result)
+    return result
+
+
 def compute_rally_streak(candles: list[dict]) -> dict:
     """
     Menghitung "rally streak": jumlah candle harian berturut-turut (dari yang
@@ -1005,6 +1094,31 @@ async def get_earnings_schedule(
 
     loop = asyncio.get_running_loop()
     info = await loop.run_in_executor(None, fetch_earnings_info, kode_upper, saham_obj.market)
+    return info
+
+
+@router.get("/saham/{kode}/dividen")
+@router.get("/data/saham/{kode}/dividen")
+async def get_dividend_events(
+    kode: str,
+    market: str | None = None,
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Agenda korporasi (jadwal dividen: ex-dividen & pembayaran) yang bisa
+    menggerakkan harga saham selain rilis laporan keuangan. `market` opsional —
+    kalau tidak dikirim, ditebak dari DB lalu default non-IDX (US) supaya saham
+    hasil Search tetap dapat data tanpa harus terdaftar di watchlist.
+    """
+    kode_upper = kode.strip().upper()
+    resolved_market = market
+    if not resolved_market:
+        res = await db.execute(select(Saham).where(Saham.kode == kode_upper))
+        saham_obj = res.scalar_one_or_none()
+        resolved_market = saham_obj.market if saham_obj else "NASDAQ"
+
+    loop = asyncio.get_running_loop()
+    info = await loop.run_in_executor(None, fetch_dividend_events, kode_upper, resolved_market)
     return info
 
 
@@ -1157,6 +1271,277 @@ async def get_analyst_ratings(
     loop = asyncio.get_running_loop()
     info = await loop.run_in_executor(None, fetch_analyst_ratings, kode_upper, resolved_market)
     return info
+
+
+# ============================================================
+# Fundamental Emiten (valuasi / profitabilitas / kesehatan / pertumbuhan)
+# ============================================================
+
+_yf_fundamental_cache = {}
+YF_FUNDAMENTAL_CACHE_TTL = 6 * 3600  # 6 jam — rasio fundamental jarang berubah dalam sehari
+
+
+def fetch_fundamentals(symbol: str, market: str = "NASDAQ") -> dict:
+    """
+    Mengambil ringkasan fundamental emiten dari yfinance untuk ditampilkan di
+    halaman detail saham:
+      1. Valuasi        : trailing/forward PE, PBV, dividend yield, market cap.
+      2. Profitabilitas : ROE, net/gross/operating margin.
+      3. Kesehatan      : DER, free/operating cash flow, total kas & utang.
+      4. Pertumbuhan    : revenue/earnings growth terkini + deret ~4 tahun
+                          (revenue & laba bersih) dari income_stmt + CAGR revenue.
+
+    Semua angka dikirim MENTAH persis seperti yfinance (rasio dalam desimal,
+    mis. ROE 0.18 = 18%); interpretasi/ambang dilakukan di sisi iOS.
+
+    CATATAN: cakupan data paling lengkap untuk saham AS (mis. MU, NVDA); untuk
+    emiten IDX banyak field sering kosong — field yang tidak tersedia = null.
+    """
+    symbol_upper = symbol.strip().upper()
+    market_clean = normalize_market(market)
+    cache_key = (symbol_upper, market_clean)
+    now = time.time()
+
+    if cache_key in _yf_fundamental_cache:
+        cached_time, cached_data = _yf_fundamental_cache[cache_key]
+        if now - cached_time < YF_FUNDAMENTAL_CACHE_TTL:
+            return cached_data
+
+    result: dict[str, Any] = {
+        "kode_saham": symbol_upper,
+        # Valuasi
+        "trailing_pe": None, "forward_pe": None, "pbv": None,
+        "dividend_yield": None, "market_cap": None,
+        # Profitabilitas
+        "roe": None, "profit_margin": None, "gross_margin": None, "operating_margin": None,
+        # Kesehatan keuangan
+        "der": None, "free_cash_flow": None, "operating_cash_flow": None,
+        "total_cash": None, "total_debt": None,
+        # Pertumbuhan (terkini)
+        "revenue_growth": None, "earnings_growth": None,
+        # Pertumbuhan (deret tahunan) + CAGR revenue
+        "annual_growth": [], "revenue_cagr": None,
+        # Meta
+        "long_name": None, "sector": None, "industry": None, "currency": None,
+        "sumber": "yfinance",
+    }
+
+    def _f(v):
+        try:
+            return float(v) if v is not None and pd.notna(v) else None
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        ticker = yf.Ticker(get_yf_symbol(symbol_upper, market_clean))
+
+        # 1. Ringkasan dari .info (satu panggilan berisi mayoritas rasio)
+        try:
+            info = ticker.info or {}
+            # DER yfinance dalam persen (mis. 120.5 = 1.2x) — bagi 100 supaya
+            # konsisten sebagai kelipatan (x), sesuai konvensi DER di IDX.
+            der_raw = _f(info.get("debtToEquity"))
+            result.update({
+                "trailing_pe":     _f(info.get("trailingPE")),
+                "forward_pe":      _f(info.get("forwardPE")),
+                "pbv":             _f(info.get("priceToBook")),
+                "dividend_yield":  _f(info.get("dividendYield")),
+                "market_cap":      _f(info.get("marketCap")),
+                "roe":             _f(info.get("returnOnEquity")),
+                "profit_margin":   _f(info.get("profitMargins")),
+                "gross_margin":    _f(info.get("grossMargins")),
+                "operating_margin": _f(info.get("operatingMargins")),
+                "der":             der_raw / 100.0 if der_raw is not None else None,
+                "free_cash_flow":  _f(info.get("freeCashflow")),
+                "operating_cash_flow": _f(info.get("operatingCashflow")),
+                "total_cash":      _f(info.get("totalCash")),
+                "total_debt":      _f(info.get("totalDebt")),
+                "revenue_growth":  _f(info.get("revenueGrowth")),
+                "earnings_growth": _f(info.get("earningsGrowth")),
+                "long_name":       info.get("longName") or info.get("shortName"),
+                "sector":          info.get("sector"),
+                "industry":        info.get("industry"),
+                "currency":        info.get("financialCurrency") or info.get("currency"),
+            })
+        except Exception as e:
+            logger.warning(f"info fundamental {symbol_upper}: {e}")
+
+        # 2. Deret pertumbuhan tahunan dari income_stmt (kolom = tahun, baris = akun)
+        try:
+            stmt = ticker.income_stmt
+            if stmt is not None and not stmt.empty:
+                def _row(*names):
+                    for n in names:
+                        if n in stmt.index:
+                            return stmt.loc[n]
+                    return None
+                rev_row = _row("Total Revenue", "TotalRevenue", "Operating Revenue")
+                ni_row  = _row("Net Income", "NetIncome",
+                               "Net Income Common Stockholders")
+                # Kolom terurut baru->lama; balik jadi lama->baru, ambil ≤4 tahun.
+                cols = list(stmt.columns)[:4][::-1]
+                annual = []
+                for c in cols:
+                    year = c.year if hasattr(c, "year") else None
+                    rev = _f(rev_row.get(c)) if rev_row is not None else None
+                    ni  = _f(ni_row.get(c)) if ni_row is not None else None
+                    if year is not None and (rev is not None or ni is not None):
+                        annual.append({"year": year, "revenue": rev, "net_income": ni})
+                result["annual_growth"] = annual
+
+                # CAGR revenue dari titik pertama ke terakhir yang valid & > 0.
+                revs = [a for a in annual if a["revenue"] and a["revenue"] > 0]
+                if len(revs) >= 2:
+                    first, last = revs[0], revs[-1]
+                    n_years = last["year"] - first["year"]
+                    if n_years >= 1:
+                        result["revenue_cagr"] = (
+                            (last["revenue"] / first["revenue"]) ** (1.0 / n_years) - 1.0
+                        )
+        except Exception as e:
+            logger.warning(f"income_stmt {symbol_upper}: {e}")
+
+    except Exception as e:
+        logger.error(f"Gagal mengambil fundamental untuk {symbol_upper}: {e}")
+
+    _yf_fundamental_cache[cache_key] = (now, result)
+    return result
+
+
+@router.get("/saham/{kode}/fundamentals")
+@router.get("/data/saham/{kode}/fundamentals")
+async def get_fundamentals(
+    kode: str,
+    market: str | None = None,
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Ringkasan fundamental emiten (valuasi, profitabilitas, kesehatan keuangan,
+    pertumbuhan) untuk halaman detail. `market` opsional — kalau tidak dikirim,
+    ditebak dari DB lalu default non-IDX (US) supaya saham hasil Search tetap
+    dapat data tanpa harus terdaftar di watchlist.
+    """
+    kode_upper = kode.strip().upper()
+    resolved_market = market
+    if not resolved_market:
+        res = await db.execute(select(Saham).where(Saham.kode == kode_upper))
+        saham_obj = res.scalar_one_or_none()
+        resolved_market = saham_obj.market if saham_obj else "NASDAQ"
+
+    loop = asyncio.get_running_loop()
+    info = await loop.run_in_executor(None, fetch_fundamentals, kode_upper, resolved_market)
+    return info
+
+
+# ============================================================
+# Business Moat (narasi kualitatif via LLM lokal)
+# ============================================================
+
+_moat_cache = {}
+MOAT_CACHE_TTL = 24 * 3600  # 24 jam — keunggulan kompetitif sangat jarang berubah
+
+
+async def generate_moat_narrative(
+    symbol: str, name: str | None, sector: str | None, fundamentals: dict
+) -> dict:
+    """
+    Menghasilkan narasi singkat "business moat" (keunggulan kompetitif) untuk
+    satu emiten memakai LLM lokal (Ollama/Qwen) yang sama dengan chatbot &
+    scoring. Dipandu beberapa angka fundamental supaya penilaian lebih membumi.
+
+    Serialisasi lewat `scoring_lock` agar tidak bentrok dengan job scoring
+    (keduanya memanggil LLM lokal yang tidak boleh jalan bersamaan). Kalau LLM
+    gagal/timeout → moat_text = None (iOS menyembunyikan section moat).
+    """
+    symbol_upper = symbol.strip().upper()
+    now = time.time()
+
+    if symbol_upper in _moat_cache:
+        cached_time, cached_data = _moat_cache[symbol_upper]
+        if now - cached_time < MOAT_CACHE_TTL:
+            return cached_data
+
+    result = {"kode_saham": symbol_upper, "moat_text": None, "sumber": "AI (Qwen lokal)"}
+
+    def _pct(v):
+        return f"{v * 100:.1f}%" if isinstance(v, (int, float)) else "n/a"
+
+    metrik = (
+        f"- ROE: {_pct(fundamentals.get('roe'))}\n"
+        f"- Gross margin: {_pct(fundamentals.get('gross_margin'))}\n"
+        f"- Net margin: {_pct(fundamentals.get('profit_margin'))}\n"
+        f"- Market cap: {fundamentals.get('market_cap') or 'n/a'}"
+    )
+    industry = fundamentals.get("industry")
+    prompt = (
+        f"Kamu analis saham. Nilai secara singkat apakah perusahaan berikut punya "
+        f"\"business moat\" (keunggulan kompetitif yang sulit ditiru pesaing).\n\n"
+        f"Perusahaan: {name or symbol_upper} ({symbol_upper})\n"
+        f"Sektor: {sector or 'tidak diketahui'}\n"
+        f"Industri: {industry or 'tidak diketahui'}\n"
+        f"Data fundamental:\n{metrik}\n\n"
+        f"PENTING: nilai berdasarkan bisnis SEBENARNYA perusahaan ini sesuai "
+        f"industri di atas — jangan mengarang lini bisnis yang tidak sesuai. "
+        f"Jawab dalam Bahasa Indonesia, 2-3 kalimat saja. Sebutkan jenis moat bila ada "
+        f"(mis. kekuatan merek, keunggulan biaya, efek jaringan, biaya beralih tinggi, "
+        f"aset tak berwujud/lisensi/skala), atau nyatakan bila moat lemah/tidak jelas. "
+        f"Jangan beri rekomendasi beli/jual. Langsung ke inti tanpa pembuka."
+    )
+
+    try:
+        from backend.agents.scoring_agent import _get_llm
+        from backend.workers import scoring_lock
+        from langchain_core.messages import HumanMessage
+
+        async with scoring_lock:
+            llm = _get_llm()
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
+        text = (getattr(response, "content", "") or "").strip()
+        # Buang blok reasoning <think>…</think> bila model memunculkannya.
+        if "</think>" in text:
+            text = text.split("</think>")[-1].strip()
+        result["moat_text"] = text or None
+    except Exception as e:
+        logger.error(f"Gagal generate moat untuk {symbol_upper}: {e}")
+
+    _moat_cache[symbol_upper] = (now, result)
+    return result
+
+
+@router.get("/saham/{kode}/moat")
+@router.get("/data/saham/{kode}/moat")
+async def get_moat(
+    kode: str,
+    market: str | None = None,
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Narasi kualitatif "business moat" untuk satu emiten (di-generate LLM lokal,
+    di-cache 24 jam). Dipisah dari endpoint /fundamental supaya kartu angka
+    tampil instan sementara narasi menyusul.
+    """
+    kode_upper = kode.strip().upper()
+    resolved_market = market
+    nama = None
+    res = await db.execute(select(Saham).where(Saham.kode == kode_upper))
+    saham_obj = res.scalar_one_or_none()
+    if saham_obj:
+        nama = saham_obj.nama_perusahaan
+        if not resolved_market:
+            resolved_market = saham_obj.market
+    if not resolved_market:
+        resolved_market = "NASDAQ"
+
+    loop = asyncio.get_running_loop()
+    fundamentals = await loop.run_in_executor(
+        None, fetch_fundamentals, kode_upper, resolved_market
+    )
+    # Prioritaskan nama dari DB; kalau saham tidak terdaftar (mis. hasil Search),
+    # pakai longName dari yfinance supaya LLM tidak menebak nama perusahaan.
+    nama = nama or fundamentals.get("long_name")
+    return await generate_moat_narrative(
+        kode_upper, nama, fundamentals.get("sector"), fundamentals
+    )
 
 
 @router.get("/stocks")

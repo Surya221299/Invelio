@@ -119,6 +119,7 @@ struct StockDetailView: View {
                         accentColor:       accentColor,
                         displayIsPositive: displayIsPositive,
                         market:            market,
+                        lineWidth:         1.0,
                         analystTargets:    viewModel.analystRatings?.history ?? []
                     )
                     .frame(height: 230)
@@ -151,12 +152,19 @@ struct StockDetailView: View {
                     Divider().padding(.horizontal)
 
                     AIInsightCard(symbol: viewModel.item.symbol)
-                        .padding(.horizontal)
+                        .padding(.horizontal, 0)
                         .animation(.easeInOut(duration: 0.3), value: viewModel.item.symbol)
 
                     EarningsRallyCard(
                         earnings: viewModel.earningsInfo,
-                        rally:    viewModel.rallyStreak
+                        rally:    viewModel.rallyStreak,
+                        dividend: viewModel.dividendEvents
+                    )
+                    .padding(.horizontal)
+
+                    FundamentalsCard(
+                        fundamentals: viewModel.fundamentals,
+                        moat:         viewModel.moat
                     )
                     .padding(.horizontal)
 
@@ -173,14 +181,28 @@ struct StockDetailView: View {
         .navigationTitle(viewModel.item.symbol)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task { await viewModel.toggleWatchlist() }
+                } label: {
+                    Image(systemName: viewModel.isWatchlist ? "star.fill" : "star")
+                        .foregroundColor(viewModel.isWatchlist ? Color.PrimaryYellow : .secondary)
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .disabled(viewModel.isTogglingWatchlist)
+            }
+        }
         .sheet(isPresented: $showTradeSheet) {
             TradeSheetView(stock: viewModel.item, initialTradeType: initialTradeType, lockTradeType: true)
                 .presentationDetents([.large])
                 .environmentObject(portfolioVM)
         }
+        .task { await viewModel.fetchWatchlistStatus() }
         .task { await viewModel.fetchChartData() }
         .task { await viewModel.fetchEarningsAndRallyInfo() }
         .task { await viewModel.fetchAnalystRatings() }
+        .task { await viewModel.fetchFundamentals() }
         .onReceive(
             Timer.publish(every: 5 * 60, on: .main, in: .common).autoconnect()
         ) { _ in
@@ -216,7 +238,7 @@ struct StockDetailView: View {
 
                     // Buy — kanan.
                     Button(action: { initialTradeType = 0; showTradeSheet = true }) {
-                        Text("Buy")
+                        Text("Beli")
                             .font(.system(size: 15, weight: .bold))
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
@@ -418,6 +440,16 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
     /// langsung anak ScrollView) tetap pakai `.gesture` default.
     var useHighPriorityDrag: Bool = false
 
+    /// When false, no area shape gradient fill is drawn under the line (pure line chart).
+    var showAreaGradient: Bool = true
+    /// Stroke width for chart lines. Default is 1.0.
+    var lineWidth: CGFloat = 1.0
+    /// Background fill for the chart container box. Default is Color.appCardBackground.
+    /// Set to .clear when the chart is embedded inside another styled card (e.g. PortfolioSummaryCardView).
+    var containerBackgroundColor: Color? = Color.appCardBackground
+    /// Custom gradient stops for area fill (e.g. Portfolio glowing orange gradient).
+    var customAreaGradientStops: [Gradient.Stop]? = nil
+
     /// Riwayat price target dari analis. Ditampilkan sebagai titik kuning yang
     /// bisa ditekan, diposisikan di sumbu-X sesuai tanggal rating & sumbu-Y
     /// sesuai nilai target. Hanya baris dengan tanggal DI DALAM rentang data
@@ -539,7 +571,13 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color.appCardBackground))
+        .background(
+            Group {
+                if let bg = containerBackgroundColor, bg != .clear {
+                    RoundedRectangle(cornerRadius: 12).fill(bg)
+                }
+            }
+        )
         // Catatan: clip rounded TIDAK dipasang di sini lagi — kalau seluruh ZStack
         // di-clip, dot harga terakhir / pulse ring di tepi kanan (x ≈ width-4)
         // ikut ter-crop. Clip rounded sekarang hanya membungkus grafik area/line
@@ -669,61 +707,88 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                 DashLine(from: CGPoint(x: 0, y: yMin), to: CGPoint(x: chartSize.width, y: yMin))
                     .stroke(Color.secondary.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 AnimatableHDashLine(y: yBaseline)
-                    .stroke(Color.AccentGold.opacity(0.50),
+                    .stroke((fixedColor ?? Color.AccentGold).opacity(fixedColor != nil ? 0.35 : 0.50),
                             style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
                     .animation(.spring(response: 1.55, dampingFraction: 1.0), value: yBaseline)
 
                 if isOneDay {
                     ZStack {
-                        OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
-                                        hPad: 4, closingY: yBaseline)
-                            .fill(LinearGradient(stops: [
-                                .init(color: greenColor.opacity(0.38), location: 0.0),
-                                .init(color: greenColor.opacity(0.18), location: 0.5),
-                                .init(color: greenColor.opacity(0.0),  location: 1.0)],
-                                startPoint: .top, endPoint: .bottom))
-                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
-                        OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
-                                        hPad: 4, closingY: yBaseline)
-                            .fill(LinearGradient(stops: [
-                                .init(color: redColor.opacity(0.38), location: 0.0),
-                                .init(color: redColor.opacity(0.18), location: 0.5),
-                                .init(color: redColor.opacity(0.0),  location: 1.0)],
-                                startPoint: .bottom, endPoint: .top))
-                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
-                                width: chartSize.width, height: chartSize.height - yBaseline)))
-                        OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
-                            .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
-                        OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
-                            .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                            .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
-                                width: chartSize.width, height: chartSize.height - yBaseline)))
+                        if showAreaGradient {
+                            if let customStops = customAreaGradientStops {
+                                OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
+                                                hPad: 4, closingY: chartSize.height)
+                                    .fill(LinearGradient(stops: customStops,
+                                                         startPoint: .top, endPoint: .bottom))
+                            } else {
+                                OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
+                                                hPad: 4, closingY: yBaseline)
+                                    .fill(LinearGradient(stops: [
+                                        .init(color: greenColor.opacity(0.38), location: 0.0),
+                                        .init(color: greenColor.opacity(0.18), location: 0.5),
+                                        .init(color: greenColor.opacity(0.0),  location: 1.0)],
+                                        startPoint: .top, endPoint: .bottom))
+                                    .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
+                                OneDayAreaShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots,
+                                                hPad: 4, closingY: yBaseline)
+                                    .fill(LinearGradient(stops: [
+                                        .init(color: redColor.opacity(0.38), location: 0.0),
+                                        .init(color: redColor.opacity(0.18), location: 0.5),
+                                        .init(color: redColor.opacity(0.0),  location: 1.0)],
+                                        startPoint: .bottom, endPoint: .top))
+                                    .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
+                                        width: chartSize.width, height: chartSize.height - yBaseline)))
+                            }
+                        }
+                        if fixedColor != nil {
+                            OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
+                                .stroke(greenColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+                        } else {
+                            OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
+                                .stroke(greenColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+                                .clipShape(Rectangle().path(in: CGRect(x: 0, y: 0, width: chartSize.width, height: yBaseline)))
+                            OneDayLineShape(points: oneDayPoints, totalSlots: chartVM.oneDayTotalSlots, hPad: 4)
+                                .stroke(redColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+                                .clipShape(Rectangle().path(in: CGRect(x: 0, y: yBaseline,
+                                    width: chartSize.width, height: chartSize.height - yBaseline)))
+                        }
                     }
                     .clipShape(AnimatableClipRect(clipWidth: oneDayClipWidth))
 
                 } else {
                     ZStack {
-                        MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
-                            .fill(LinearGradient(stops: [
-                                .init(color: greenColor.opacity(0.38), location: 0.0),
-                                .init(color: greenColor.opacity(0.18), location: 0.5),
-                                .init(color: greenColor.opacity(0.0),  location: 1.0)],
-                                startPoint: .top, endPoint: .bottom))
-                            .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
-                        MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
-                            .fill(LinearGradient(stops: [
-                                .init(color: redColor.opacity(0.38), location: 0.0),
-                                .init(color: redColor.opacity(0.18), location: 0.5),
-                                .init(color: redColor.opacity(0.0),  location: 1.0)],
-                                startPoint: .bottom, endPoint: .top))
-                            .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
-                        MorphingXYLineShape(data: animatedData)
-                            .stroke(greenColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                            .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
-                        MorphingXYLineShape(data: animatedData)
-                            .stroke(redColor, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                            .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
+                        if showAreaGradient {
+                            if let customStops = customAreaGradientStops {
+                                MorphingXYAreaShape(data: animatedData, closingY: chartSize.height)
+                                    .fill(LinearGradient(stops: customStops,
+                                                         startPoint: .top, endPoint: .bottom))
+                            } else {
+                                MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
+                                    .fill(LinearGradient(stops: [
+                                        .init(color: greenColor.opacity(0.38), location: 0.0),
+                                        .init(color: greenColor.opacity(0.18), location: 0.5),
+                                        .init(color: greenColor.opacity(0.0),  location: 1.0)],
+                                        startPoint: .top, endPoint: .bottom))
+                                    .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
+                                MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
+                                    .fill(LinearGradient(stops: [
+                                        .init(color: redColor.opacity(0.38), location: 0.0),
+                                        .init(color: redColor.opacity(0.18), location: 0.5),
+                                        .init(color: redColor.opacity(0.0),  location: 1.0)],
+                                        startPoint: .bottom, endPoint: .top))
+                                    .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
+                            }
+                        }
+                        if fixedColor != nil {
+                            MorphingXYLineShape(data: animatedData)
+                                .stroke(greenColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+                        } else {
+                            MorphingXYLineShape(data: animatedData)
+                                .stroke(greenColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+                                .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
+                            MorphingXYLineShape(data: animatedData)
+                                .stroke(redColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+                                .clipShape(AnimatableClipBelow(cutY: animatedBaselineY, totalHeight: chartSize.height))
+                        }
                     }
                     .clipShape(AnimatableClipRect(clipWidth: (!revealOnFirstLoad || hasRevealed) ? chartSize.width : revealClipWidth))
                 }
@@ -733,15 +798,22 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
             // ==== Overlay — TIDAK di-clip (dot & shadow bebas di tepi) ====
 
             // Max / Min labels
+            let hasMinMaxBg = containerBackgroundColor != .clear
             Text("Max \(formatPrice(maxP, market: market))")
-                .font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
-                .padding(.horizontal, 4).padding(.vertical, 2)
-                .background(Color.appElevatedBackground.opacity(0.85)).cornerRadius(4)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(hasMinMaxBg ? .secondary : .white.opacity(0.70))
+                .padding(.horizontal, hasMinMaxBg ? 4 : 0)
+                .padding(.vertical, hasMinMaxBg ? 2 : 0)
+                .background(hasMinMaxBg ? Color.appElevatedBackground.opacity(0.85) : Color.clear)
+                .cornerRadius(4)
                 .position(x: chartSize.width - 34, y: yMax - 10)
             Text("Min \(formatPrice(minP, market: market))")
-                .font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
-                .padding(.horizontal, 4).padding(.vertical, 2)
-                .background(Color.appCardBackground.opacity(0.85)).cornerRadius(4)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(hasMinMaxBg ? .secondary : .white.opacity(0.70))
+                .padding(.horizontal, hasMinMaxBg ? 4 : 0)
+                .padding(.vertical, hasMinMaxBg ? 2 : 0)
+                .background(hasMinMaxBg ? Color.appCardBackground.opacity(0.85) : Color.clear)
+                .cornerRadius(4)
                 .position(x: chartSize.width - 34, y: yMin + 10)
 
             // Active price dot & dashed line — 1D (pulse saat market aktif)
@@ -997,7 +1069,21 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                 let lo    = max(0, min(Int(tData), data.count - 1))
                 let hi    = min(lo + 1, data.count - 1)
                 let frac  = tData - Double(lo)
-                let val   = closes[lo] * (1 - frac) + closes[hi] * frac
+
+                // Catmull-Rom cubic spline interpolation across data points
+                let p0Val = closes[max(lo - 1, 0)]
+                let p1Val = closes[lo]
+                let p2Val = closes[hi]
+                let p3Val = closes[min(hi + 1, closes.count - 1)]
+                let t2    = frac * frac
+                let t3    = t2 * frac
+                let val   = 0.5 * (
+                    (2.0 * p1Val) +
+                    (-p0Val + p2Val) * frac +
+                    (2.0 * p0Val - 5.0 * p1Val + 4.0 * p2Val - p3Val) * t2 +
+                    (-p0Val + 3.0 * p1Val - 3.0 * p2Val + p3Val) * t3
+                )
+
                 let normY = vRange > 0 ? (val - minV) / vRange : 0.5
                 let y     = topPad + usable * CGFloat(1.0 - normY)
                 let t = CGFloat(i) / CGFloat(resampleCount - 1)
@@ -1706,14 +1792,8 @@ struct MorphingXYLineShape: Shape {
     func path(in rect: CGRect) -> Path {
         let pts = data.points; guard pts.count > 1 else { return Path() }
         var path = Path(); path.move(to: CGPoint(x: pts[0].x, y: pts[0].y))
-        let tension: CGFloat = 0.4
         for i in 1..<pts.count {
-            let p0 = pts[max(i-2,0)]; let p1 = pts[i-1]; let p2 = pts[i]; let p3 = pts[min(i+1,pts.count-1)]
-            let cp1 = CGPoint(x: (p1.x + (p2.x-p0.x)*tension).clamped(to: 0...rect.width),
-                              y:  p1.y + (p2.y-p0.y)*tension)
-            let cp2 = CGPoint(x: (p2.x - (p3.x-p1.x)*tension).clamped(to: 0...rect.width),
-                              y:  p2.y - (p3.y-p1.y)*tension)
-            path.addCurve(to: CGPoint(x: p2.x, y: p2.y), control1: cp1, control2: cp2)
+            path.addLine(to: CGPoint(x: pts[i].x, y: pts[i].y))
         }
         return path
     }
@@ -1731,14 +1811,8 @@ struct MorphingXYAreaShape: Shape {
     func path(in rect: CGRect) -> Path {
         let pts = data.points; guard pts.count > 1 else { return Path() }
         var path = Path(); path.move(to: CGPoint(x: pts[0].x, y: pts[0].y))
-        let tension: CGFloat = 0.4
         for i in 1..<pts.count {
-            let p0 = pts[max(i-2,0)]; let p1 = pts[i-1]; let p2 = pts[i]; let p3 = pts[min(i+1,pts.count-1)]
-            let cp1 = CGPoint(x: (p1.x + (p2.x-p0.x)*tension).clamped(to: 0...rect.width),
-                              y:  p1.y + (p2.y-p0.y)*tension)
-            let cp2 = CGPoint(x: (p2.x - (p3.x-p1.x)*tension).clamped(to: 0...rect.width),
-                              y:  p2.y - (p3.y-p1.y)*tension)
-            path.addCurve(to: CGPoint(x: p2.x, y: p2.y), control1: cp1, control2: cp2)
+            path.addLine(to: CGPoint(x: pts[i].x, y: pts[i].y))
         }
         path.addLine(to: CGPoint(x: pts.last!.x,  y: closingY))
         path.addLine(to: CGPoint(x: pts.first!.x, y: closingY))
@@ -1763,7 +1837,7 @@ struct MorphingLineShape: Shape {
                     y: topPad + usable * CGFloat(1.0 - v.clamped(to: -0.05...1.05)))
         }
         var path = Path(); path.move(to: pts[0])
-        let tension: CGFloat = 0.4
+        let tension: CGFloat = 0.2
         for i in 1..<pts.count {
             let p0 = pts[max(i-2,0)]; let p1 = pts[i-1]; let p2 = pts[i]; let p3 = pts[min(i+1,pts.count-1)]
             let cp1 = CGPoint(x: (p1.x+(p2.x-p0.x)*tension).clamped(to: xMin...xMax), y: p1.y+(p2.y-p0.y)*tension)
@@ -1791,7 +1865,7 @@ struct MorphingAreaShape: Shape {
                     y: topPad + usable * CGFloat(1.0 - v.clamped(to: -0.05...1.05)))
         }
         var path = Path(); path.move(to: pts[0])
-        let tension: CGFloat = 0.4
+        let tension: CGFloat = 0.2
         for i in 1..<pts.count {
             let p0 = pts[max(i-2,0)]; let p1 = pts[i-1]; let p2 = pts[i]; let p3 = pts[min(i+1,pts.count-1)]
             let cp1 = CGPoint(x: (p1.x+(p2.x-p0.x)*tension).clamped(to: xMin...xMax), y: p1.y+(p2.y-p0.y)*tension)

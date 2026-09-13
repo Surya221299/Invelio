@@ -32,6 +32,7 @@ struct SentimentPillView: View {
 // MARK: - SentimentBarView
 struct SentimentBarView: View {
     let sentiment: Sentiment
+    var showPercentage: Bool = false
     private var color: Color { sentiment.type.color }
     var body: some View {
         HStack(spacing: 6) {
@@ -41,8 +42,10 @@ struct SentimentBarView: View {
                 RoundedRectangle(cornerRadius: 3)
                     .fill(color).frame(width: DesignSize.sentimentBarWidth * CGFloat(sentiment.score / 100.0), height: DesignSize.sentimentBarHeight)
             }
-            Text(String(format: "%.1f%%", sentiment.score))
-                .font(.system(size: 10, weight: .bold, design: .rounded)).foregroundColor(color)
+            if showPercentage {
+                Text(String(format: "%.1f%%", sentiment.score))
+                    .font(.system(size: 10, weight: .bold, design: .rounded)).foregroundColor(color)
+            }
         }
     }
 }

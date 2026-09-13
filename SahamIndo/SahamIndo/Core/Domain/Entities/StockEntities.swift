@@ -196,6 +196,184 @@ struct EarningsInfo {
     }
 }
 
+// MARK: - CompanyFundamentals (ringkasan fundamental emiten)
+
+/// Penilaian kualitatif satu metrik fundamental. Warna dipetakan di View
+/// (domain layer tetap bebas framework).
+enum FundamentalVerdict {
+    case good      // sehat / murah / kuat
+    case fair      // wajar / cukup
+    case weak      // mahal / lemah / berisiko
+    case unknown   // data tidak tersedia
+
+    var label: String {
+        switch self {
+        case .good:    return "Bagus"
+        case .fair:    return "Cukup"
+        case .weak:    return "Lemah"
+        case .unknown: return "-"
+        }
+    }
+}
+
+/// Satu titik pertumbuhan tahunan (revenue & laba bersih) untuk satu tahun buku.
+struct GrowthPoint: Identifiable {
+    var id: Int { year }
+    let year:      Int
+    let revenue:   Double?
+    let netIncome: Double?
+}
+
+/// Ringkasan fundamental emiten dari yfinance. Semua rasio dalam bentuk desimal
+/// mentah persis yfinance (mis. roe 0.18 = 18%, der 1.2 = 1.2x). Field yang
+/// tidak tersedia = nil (umum untuk emiten IDX di yfinance).
+struct CompanyFundamentals {
+    let symbol: String
+    // Valuasi
+    let trailingPE:    Double?
+    let forwardPE:     Double?
+    let pbv:           Double?
+    let dividendYield: Double?
+    let marketCap:     Double?
+    // Profitabilitas
+    let roe:             Double?
+    let profitMargin:    Double?
+    let grossMargin:     Double?
+    let operatingMargin: Double?
+    // Kesehatan keuangan
+    let der:               Double?
+    let freeCashFlow:      Double?
+    let operatingCashFlow: Double?
+    let totalCash:         Double?
+    let totalDebt:         Double?
+    // Pertumbuhan terkini
+    let revenueGrowth:  Double?
+    let earningsGrowth: Double?
+    // Pertumbuhan deret tahunan + CAGR revenue
+    let annualGrowth: [GrowthPoint]
+    let revenueCAGR:  Double?
+    // Meta
+    let sector:   String?
+    let industry: String?
+    let currency: String?
+
+    /// Semua bagian kosong → kartu disembunyikan.
+    var isEmpty: Bool {
+        trailingPE == nil && forwardPE == nil && pbv == nil && roe == nil &&
+        profitMargin == nil && der == nil && freeCashFlow == nil &&
+        revenueGrowth == nil && annualGrowth.isEmpty
+    }
+
+    var hasValuation:     Bool { trailingPE != nil || forwardPE != nil || pbv != nil }
+    var hasProfitability: Bool { roe != nil || profitMargin != nil || grossMargin != nil }
+    var hasHealth:        Bool { der != nil || freeCashFlow != nil }
+    var hasGrowth:        Bool { revenueGrowth != nil || earningsGrowth != nil || annualGrowth.count >= 2 }
+
+    // MARK: - Verdicts (interpretasi ambang)
+
+    /// Valuasi dari PER: <=15 murah, <=25 wajar, >25 mahal. PER <=0 (rugi) → unknown.
+    var valuationVerdict: FundamentalVerdict {
+        guard let pe = trailingPE ?? forwardPE, pe > 0 else { return .unknown }
+        if pe <= 15 { return .good }
+        if pe <= 25 { return .fair }
+        return .weak
+    }
+
+    var valuationLabel: String {
+        switch valuationVerdict {
+        case .good:    return "Relatif murah"
+        case .fair:    return "Wajar"
+        case .weak:    return "Relatif mahal"
+        case .unknown: return "-"
+        }
+    }
+
+    /// ROE: >=15% bagus, >=10% cukup, sisanya lemah (patokan umum kualitas).
+    var roeVerdict: FundamentalVerdict {
+        guard let r = roe else { return .unknown }
+        if r >= 0.15 { return .good }
+        if r >= 0.10 { return .fair }
+        return .weak
+    }
+
+    /// Net margin: ambang umum lintas industri (konteks industri diberi di teks).
+    var netMarginVerdict: FundamentalVerdict {
+        guard let m = profitMargin else { return .unknown }
+        if m >= 0.15 { return .good }
+        if m >= 0.05 { return .fair }
+        if m <= 0    { return .weak }
+        return .fair
+    }
+
+    /// Kesehatan keuangan gabungan DER + FCF (aturan: utang besar + FCF positif
+    /// masih oke; utang besar + FCF negatif = berbahaya).
+    var financialHealthVerdict: FundamentalVerdict {
+        guard der != nil || freeCashFlow != nil else { return .unknown }
+        let fcf = freeCashFlow
+        let d   = der
+        if let fcf {
+            if fcf >= 0 {
+                if let d, d > 2 { return .fair }   // utang besar tapi arus kas positif
+                return .good
+            } else {
+                if let d, d > 1 { return .weak }   // utang besar + arus kas negatif
+                return .fair
+            }
+        }
+        // Hanya DER yang diketahui.
+        if let d { return d <= 1 ? .good : (d <= 2 ? .fair : .weak) }
+        return .unknown
+    }
+
+    /// Pertumbuhan dari CAGR revenue (fallback ke revenueGrowth terkini).
+    var growthVerdict: FundamentalVerdict {
+        guard let g = revenueCAGR ?? revenueGrowth else { return .unknown }
+        if g >= 0.15 { return .good }
+        if g >= 0.05 { return .fair }
+        if g <  0    { return .weak }
+        return .fair
+    }
+}
+
+// MARK: - MoatInsight (narasi kualitatif business moat via LLM)
+
+struct MoatInsight {
+    let symbol:   String
+    let moatText: String?
+    let source:   String?
+
+    var hasText: Bool { !(moatText ?? "").isEmpty }
+}
+
+// MARK: - DividendEvents (agenda korporasi: jadwal dividen)
+
+/// Jadwal dividen — agenda korporasi yang bisa menggerakkan harga saham selain
+/// rilis laporan keuangan. Di tanggal ex-dividen, pembeli tidak lagi berhak
+/// atas dividen sehingga harga cenderung turun ~sebesar dividen.
+struct DividendEvents {
+    let symbol:       String
+    let exDividendDate: Date?
+    let paymentDate:  Date?
+    let amount:       Double?   // nominal per lembar (cash dividend terakhir)
+    let rate:         Double?   // dividen tahunan per lembar
+    let yieldPercent: Double?   // sudah dalam persen (mis. 5.5 = 5,5%)
+    let currency:     String?
+
+    var hasData: Bool { exDividendDate != nil || paymentDate != nil }
+
+    /// Hari kalender sampai ex-dividen (negatif = sudah lewat, nil = tak diketahui).
+    var exDaysUntil:      Int? { Self.daysUntil(exDividendDate) }
+    var paymentDaysUntil: Int? { Self.daysUntil(paymentDate) }
+
+    private static func daysUntil(_ date: Date?) -> Int? {
+        guard let date else { return nil }
+        let cal   = Calendar(identifier: .gregorian)
+        let start = cal.startOfDay(for: Date())
+        let end   = cal.startOfDay(for: date)
+        return cal.dateComponents([.day], from: start, to: end).day
+    }
+}
+
 // MARK: - RallyStreakInfo (harga hijau berturut-turut)
 
 struct RallyStreakInfo {

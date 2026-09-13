@@ -34,7 +34,14 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
 
     @Published private(set) var earningsInfo: EarningsInfo?
     @Published private(set) var rallyStreak:  RallyStreakInfo?
+    @Published private(set) var dividendEvents: DividendEvents?
     @Published private(set) var analystRatings: AnalystRatings?
+    @Published private(set) var fundamentals: CompanyFundamentals?
+    @Published private(set) var moat: MoatInsight?
+
+    // MARK: - Watchlist State
+    @Published private(set) var isWatchlist:          Bool = false
+    @Published private(set) var isTogglingWatchlist:  Bool = false
 
     let item: PortfolioItem
 
@@ -66,16 +73,19 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
 
     private let fetchChartUseCase: FetchChartDataUseCase
     private let detailRepository:  StockDetailRepositoryProtocol
+    private let searchRepository:  SearchRepositoryProtocol
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Init
 
     init(item: PortfolioItem,
          fetchChartUseCase: FetchChartDataUseCase,
-         detailRepository:  StockDetailRepositoryProtocol) {
+         detailRepository:  StockDetailRepositoryProtocol,
+         searchRepository:  SearchRepositoryProtocol = DIContainer.shared.searchRepository) {
         self.item              = item
         self.fetchChartUseCase = fetchChartUseCase
         self.detailRepository  = detailRepository
+        self.searchRepository  = searchRepository
 
         // Forward perubahan dari LivePriceStore (nested ObservableObject) ke
         // objectWillChange milik ViewModel ini. Tanpa ini, update harga
@@ -161,8 +171,10 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
     func fetchEarningsAndRallyInfo() async {
         async let earnings = try? detailRepository.fetchEarningsInfo(symbol: item.symbol)
         async let rally    = try? detailRepository.fetchRallyStreak(symbol: item.symbol)
-        earningsInfo = await earnings
-        rallyStreak  = await rally
+        async let dividend = try? detailRepository.fetchDividendEvents(symbol: item.symbol, market: item.market)
+        earningsInfo   = await earnings
+        rallyStreak    = await rally
+        dividendEvents = await dividend
     }
 
     /// Ambil data perkiraan analis (konsensus + riwayat rating). Dipanggil
@@ -171,6 +183,47 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
         analystRatings = try? await detailRepository.fetchAnalystRatings(
             symbol: item.symbol, market: item.market
         )
+    }
+
+    /// Ambil ringkasan fundamental (valuasi/profitabilitas/kesehatan/growth),
+    /// lalu susulkan narasi moat (LLM lokal — lebih lambat, di-fetch terpisah
+    /// supaya kartu angka tampil lebih dulu). Cache backend 6 jam / 24 jam.
+    func fetchFundamentals() async {
+        fundamentals = try? await detailRepository.fetchFundamentals(
+            symbol: item.symbol, market: item.market
+        )
+        await fetchMoat()
+    }
+
+    func fetchMoat() async {
+        moat = try? await detailRepository.fetchMoat(
+            symbol: item.symbol, market: item.market
+        )
+    }
+
+    // MARK: - Watchlist Toggle
+
+    func fetchWatchlistStatus() async {
+        if let status = try? await searchRepository.getWatchlistStatus(kode: item.symbol) {
+            isWatchlist = status
+        }
+    }
+
+    func toggleWatchlist() async {
+        guard !isTogglingWatchlist else { return }
+        isTogglingWatchlist = true
+        let nextState = !isWatchlist
+        isWatchlist = nextState
+        do {
+            if nextState {
+                _ = try await searchRepository.addToWatchlist(kode: item.symbol)
+            } else {
+                _ = try await searchRepository.removeFromWatchlist(kode: item.symbol)
+            }
+        } catch {
+            isWatchlist = !nextState
+        }
+        isTogglingWatchlist = false
     }
 
     func oneDaySlotIndex(for date: Date) -> Int {

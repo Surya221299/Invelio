@@ -56,13 +56,11 @@ struct HomeView: View {
                     .padding(.vertical, 4)
 
                 sectionHeader("Watchlist")
+                    .padding(.top, 16)
 
                 WatchlistTabSelectorView(store: watchlistStore)
-
-                Divider()
-                    .frame(height: 1.5)
-                    .background(Color.PrimaryYellow)
-                    .padding(.horizontal)
+                    .padding(.top, -6)
+                    .padding(.bottom, 4)
 
                 if watchlistStore.activeID == "crypto" {
                     CryptoWatchlistSectionView()
@@ -172,22 +170,63 @@ struct HomeView: View {
 struct NotificationButton: View {
     let unreadCount: Int
     let action: () -> Void
+
     var body: some View {
         Button(action: action) {
             ZStack(alignment: .topTrailing) {
-                Image(systemName: "bell.fill")
-                    .font(Font.title3)
-                    .foregroundColor(.primary)
+                // Liquid Glass circular container
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.16),
+                                    Color.white.opacity(0.04)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+
+                    Circle()
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.35),
+                                    Color.white.opacity(0.08)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+
+                    Image(systemName: "bell.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+                .frame(width: 36, height: 36)
+                .shadow(color: Color.black.opacity(0.20), radius: 5, x: 0, y: 2)
+
                 if unreadCount > 0 {
                     ZStack {
-                        Circle().fill(Color.LossRed).frame(width: 16, height: 16)
+                        Circle()
+                            .fill(Color.PortfolioLossRed)
+                            .frame(width: 18, height: 18)
+                            .overlay(Circle().stroke(Color.DarkPurpleAppBackground, lineWidth: 1.5))
+
                         Text(unreadCount > 9 ? "9+" : "\(unreadCount)")
-                            .font(Font.caption2).foregroundColor(.SurfaceWhite)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.white)
                     }
-                    .offset(x: 6, y: -6)
+                    .offset(x: 3, y: -3)
                 }
             }
         }
+        .buttonStyle(.plain)
     }
 }
 

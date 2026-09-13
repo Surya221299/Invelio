@@ -99,20 +99,26 @@ struct PortfolioValueAnimator: View {
 
     @State private var displayValue: Double = 0
     @State private var flashState:   AnimatedPortfolioValueView.FlashState = .none
-    @State private var hasLoaded:    Bool = false
 
     var body: some View {
         AnimatedPortfolioValueView(displayValue: displayValue, flashState: flashState)
             .onAppear {
-                guard !hasLoaded else { return }
-                hasLoaded    = true
                 displayValue = portfolioVM.cachedStockValue
             }
+            .onChange(of: portfolioVM.cachedStockValue) { _, newCached in
+                if newCached == 0 {
+                    displayValue = 0
+                }
+            }
             .onChange(of: portfolioVM.serverStockValue) { _, serverVal in
-                // >= 0: izinkan animasi turun ke 0 saat semua saham terjual.
                 guard let serverVal, serverVal >= 0 else { return }
+                if serverVal == 0 {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        displayValue = 0
+                    }
+                    return
+                }
                 let prev = displayValue
-                // Delay 2 detik untuk efek "loading from cache then update"
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                     let direction: AnimatedPortfolioValueView.FlashState =
                         serverVal > prev ? .up : serverVal < prev ? .down : .none

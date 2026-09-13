@@ -150,4 +150,49 @@ enum StockMapper {
             }
         )
     }
+
+    static func toFundamentals(_ dto: FundamentalDTO) -> CompanyFundamentals {
+        CompanyFundamentals(
+            symbol:            dto.kode_saham,
+            trailingPE:        dto.trailing_pe,
+            forwardPE:         dto.forward_pe,
+            pbv:               dto.pbv,
+            dividendYield:     dto.dividend_yield,
+            marketCap:         dto.market_cap,
+            roe:               dto.roe,
+            profitMargin:      dto.profit_margin,
+            grossMargin:       dto.gross_margin,
+            operatingMargin:   dto.operating_margin,
+            der:               dto.der,
+            freeCashFlow:      dto.free_cash_flow,
+            operatingCashFlow: dto.operating_cash_flow,
+            totalCash:         dto.total_cash,
+            totalDebt:         dto.total_debt,
+            revenueGrowth:     dto.revenue_growth,
+            earningsGrowth:    dto.earnings_growth,
+            annualGrowth:      (dto.annual_growth ?? []).map {
+                GrowthPoint(year: $0.year, revenue: $0.revenue, netIncome: $0.net_income)
+            },
+            revenueCAGR:       dto.revenue_cagr,
+            sector:            dto.sector,
+            industry:          dto.industry,
+            currency:          dto.currency
+        )
+    }
+
+    static func toMoat(_ dto: MoatDTO) -> MoatInsight {
+        MoatInsight(symbol: dto.kode_saham, moatText: dto.moat_text, source: dto.sumber)
+    }
+
+    static func toDividendEvents(_ dto: DividendEventsDTO) -> DividendEvents {
+        DividendEvents(
+            symbol:         dto.kode_saham,
+            exDividendDate: dto.ex_dividend_date.flatMap { parseFlexibleDate($0) },
+            paymentDate:    dto.dividend_payment_date.flatMap { parseFlexibleDate($0) },
+            amount:         dto.dividend_amount,
+            rate:           dto.dividend_rate,
+            yieldPercent:   dto.dividend_yield,
+            currency:       dto.currency
+        )
+    }
 }

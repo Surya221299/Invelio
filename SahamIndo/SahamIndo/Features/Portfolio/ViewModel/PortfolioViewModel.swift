@@ -68,7 +68,13 @@ final class PortfolioViewModel: ObservableObject {
         self.fetchChartUseCase    = fetchChartUseCase
         self.healthRepository     = healthRepository
         loadPersistedData()
-        cachedStockValue = UserDefaults.standard.double(forKey: cachedValueKey)
+        let hasActiveHolding = holdings.contains { $0.quantity > 0 }
+        if !hasActiveHolding {
+            cachedStockValue = 0
+            UserDefaults.standard.set(0.0, forKey: cachedValueKey)
+        } else {
+            cachedStockValue = UserDefaults.standard.double(forKey: cachedValueKey)
+        }
     }
 
     // MARK: - Public Actions
@@ -199,10 +205,17 @@ final class PortfolioViewModel: ObservableObject {
     }
 
     func resetPortfolio() {
-        holdings     = holdings.map { Holding(id: $0.id, symbol: $0.symbol, quantity: 0, totalCostBasis: 0) }
-        tradeHistory = []
-        lots         = []
-        health       = nil
+        holdings         = holdings.map { Holding(id: $0.id, symbol: $0.symbol, quantity: 0, totalCostBasis: 0) }
+        tradeHistory     = []
+        lots             = []
+        health           = nil
+        items            = items.map {
+            PortfolioItem(symbol: $0.symbol, name: $0.name, price: $0.price, change: $0.change,
+                          percentChange: $0.percentChange, quantity: 0, sentiment: $0.sentiment, market: $0.market)
+        }
+        cachedStockValue = 0
+        serverStockValue = 0
+        UserDefaults.standard.set(0.0, forKey: cachedValueKey)
         persist()
         Task { await fetchData() }
     }

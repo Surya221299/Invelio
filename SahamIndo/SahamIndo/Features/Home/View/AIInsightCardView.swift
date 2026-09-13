@@ -92,9 +92,9 @@ struct AIInsightCardView: View {
             .padding(.bottom, 10)
         }
         .frame(minHeight: 150, alignment: .top)
-        .background(Color.PrimaryYellow.opacity(0.05))
+        .background(Color.AICardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(accent.opacity(0.25), lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
         .padding(.horizontal, 16)
         .onAppear {
             isPulsing = true
@@ -118,7 +118,7 @@ struct AIInsightCardView: View {
             Circle().fill(accent).frame(width: 7, height: 7)
                 .scaleEffect(isPulsing ? 0.7 : 1.0)
                 .animation(.easeInOut(duration: 1).repeatForever(), value: isPulsing)
-            Text("AI LIVE")
+            Text("AI Insight")
                 .font(Font.caption2)
                 .foregroundColor(accent).kerning(0.8)
         }
