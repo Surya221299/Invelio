@@ -79,9 +79,13 @@ struct PriceBadgeView: View {
     var market: String = "IDX"
     private var isPositive: Bool { change >= 0 }
     private var color: Color { isPositive ? Color.ProfitGreen : Color.LossRed }
+    private var formattedPrice: String {
+        let formatted = formatPrice(price, market: market)
+        return market.uppercased() == "IDX" ? formatted : "$\(formatted)"
+    }
     var body: some View {
         VStack(alignment: .trailing, spacing: 2) {
-            Text(formatPrice(price, market: market))
+            Text(formattedPrice)
                 .font(.system(size: 16, weight: .semibold)).lineLimit(1).fixedSize(horizontal: true, vertical: false)
             HStack(spacing: 2) {
                 Image(systemName: isPositive ? "arrow.up.right" : "arrow.down.forward")

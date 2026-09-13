@@ -215,14 +215,14 @@ struct NotificationButton: View {
                     ZStack {
                         Circle()
                             .fill(Color.PortfolioLossRed)
-                            .frame(width: 15, height: 15)
+                            .frame(width: 18, height: 18)
                             .overlay(Circle().stroke(Color.DarkPurpleAppBackground, lineWidth: 1.5))
 
                         Text(unreadCount > 9 ? "9+" : "\(unreadCount)")
-                            .font(.system(size: 8, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.white)
                     }
-                    .offset(x: 2, y: -2)
+                    .offset(x: 3, y: -3)
                 }
             }
         }

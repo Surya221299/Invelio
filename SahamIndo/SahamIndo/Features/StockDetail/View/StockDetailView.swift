@@ -181,11 +181,24 @@ struct StockDetailView: View {
         .navigationTitle(viewModel.item.symbol)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task { await viewModel.toggleWatchlist() }
+                } label: {
+                    Image(systemName: viewModel.isWatchlist ? "star.fill" : "star")
+                        .foregroundColor(viewModel.isWatchlist ? Color.PrimaryYellow : .secondary)
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .disabled(viewModel.isTogglingWatchlist)
+            }
+        }
         .sheet(isPresented: $showTradeSheet) {
             TradeSheetView(stock: viewModel.item, initialTradeType: initialTradeType, lockTradeType: true)
                 .presentationDetents([.large])
                 .environmentObject(portfolioVM)
         }
+        .task { await viewModel.fetchWatchlistStatus() }
         .task { await viewModel.fetchChartData() }
         .task { await viewModel.fetchEarningsAndRallyInfo() }
         .task { await viewModel.fetchAnalystRatings() }
@@ -225,7 +238,7 @@ struct StockDetailView: View {
 
                     // Buy — kanan.
                     Button(action: { initialTradeType = 0; showTradeSheet = true }) {
-                        Text("Buy")
+                        Text("Beli")
                             .font(.system(size: 15, weight: .bold))
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
@@ -1056,7 +1069,21 @@ struct ChartCanvasView<VM: ChartViewModelProtocol>: View {
                 let lo    = max(0, min(Int(tData), data.count - 1))
                 let hi    = min(lo + 1, data.count - 1)
                 let frac  = tData - Double(lo)
-                let val   = closes[lo] * (1 - frac) + closes[hi] * frac
+
+                // Catmull-Rom cubic spline interpolation across data points
+                let p0Val = closes[max(lo - 1, 0)]
+                let p1Val = closes[lo]
+                let p2Val = closes[hi]
+                let p3Val = closes[min(hi + 1, closes.count - 1)]
+                let t2    = frac * frac
+                let t3    = t2 * frac
+                let val   = 0.5 * (
+                    (2.0 * p1Val) +
+                    (-p0Val + p2Val) * frac +
+                    (2.0 * p0Val - 5.0 * p1Val + 4.0 * p2Val - p3Val) * t2 +
+                    (-p0Val + 3.0 * p1Val - 3.0 * p2Val + p3Val) * t3
+                )
+
                 let normY = vRange > 0 ? (val - minV) / vRange : 0.5
                 let y     = topPad + usable * CGFloat(1.0 - normY)
                 let t = CGFloat(i) / CGFloat(resampleCount - 1)
@@ -1765,14 +1792,8 @@ struct MorphingXYLineShape: Shape {
     func path(in rect: CGRect) -> Path {
         let pts = data.points; guard pts.count > 1 else { return Path() }
         var path = Path(); path.move(to: CGPoint(x: pts[0].x, y: pts[0].y))
-        let tension: CGFloat = 0.4
         for i in 1..<pts.count {
-            let p0 = pts[max(i-2,0)]; let p1 = pts[i-1]; let p2 = pts[i]; let p3 = pts[min(i+1,pts.count-1)]
-            let cp1 = CGPoint(x: (p1.x + (p2.x-p0.x)*tension).clamped(to: 0...rect.width),
-                              y:  p1.y + (p2.y-p0.y)*tension)
-            let cp2 = CGPoint(x: (p2.x - (p3.x-p1.x)*tension).clamped(to: 0...rect.width),
-                              y:  p2.y - (p3.y-p1.y)*tension)
-            path.addCurve(to: CGPoint(x: p2.x, y: p2.y), control1: cp1, control2: cp2)
+            path.addLine(to: CGPoint(x: pts[i].x, y: pts[i].y))
         }
         return path
     }
@@ -1790,14 +1811,8 @@ struct MorphingXYAreaShape: Shape {
     func path(in rect: CGRect) -> Path {
         let pts = data.points; guard pts.count > 1 else { return Path() }
         var path = Path(); path.move(to: CGPoint(x: pts[0].x, y: pts[0].y))
-        let tension: CGFloat = 0.4
         for i in 1..<pts.count {
-            let p0 = pts[max(i-2,0)]; let p1 = pts[i-1]; let p2 = pts[i]; let p3 = pts[min(i+1,pts.count-1)]
-            let cp1 = CGPoint(x: (p1.x + (p2.x-p0.x)*tension).clamped(to: 0...rect.width),
-                              y:  p1.y + (p2.y-p0.y)*tension)
-            let cp2 = CGPoint(x: (p2.x - (p3.x-p1.x)*tension).clamped(to: 0...rect.width),
-                              y:  p2.y - (p3.y-p1.y)*tension)
-            path.addCurve(to: CGPoint(x: p2.x, y: p2.y), control1: cp1, control2: cp2)
+            path.addLine(to: CGPoint(x: pts[i].x, y: pts[i].y))
         }
         path.addLine(to: CGPoint(x: pts.last!.x,  y: closingY))
         path.addLine(to: CGPoint(x: pts.first!.x, y: closingY))
@@ -1822,7 +1837,7 @@ struct MorphingLineShape: Shape {
                     y: topPad + usable * CGFloat(1.0 - v.clamped(to: -0.05...1.05)))
         }
         var path = Path(); path.move(to: pts[0])
-        let tension: CGFloat = 0.4
+        let tension: CGFloat = 0.2
         for i in 1..<pts.count {
             let p0 = pts[max(i-2,0)]; let p1 = pts[i-1]; let p2 = pts[i]; let p3 = pts[min(i+1,pts.count-1)]
             let cp1 = CGPoint(x: (p1.x+(p2.x-p0.x)*tension).clamped(to: xMin...xMax), y: p1.y+(p2.y-p0.y)*tension)
@@ -1850,7 +1865,7 @@ struct MorphingAreaShape: Shape {
                     y: topPad + usable * CGFloat(1.0 - v.clamped(to: -0.05...1.05)))
         }
         var path = Path(); path.move(to: pts[0])
-        let tension: CGFloat = 0.4
+        let tension: CGFloat = 0.2
         for i in 1..<pts.count {
             let p0 = pts[max(i-2,0)]; let p1 = pts[i-1]; let p2 = pts[i]; let p3 = pts[min(i+1,pts.count-1)]
             let cp1 = CGPoint(x: (p1.x+(p2.x-p0.x)*tension).clamped(to: xMin...xMax), y: p1.y+(p2.y-p0.y)*tension)

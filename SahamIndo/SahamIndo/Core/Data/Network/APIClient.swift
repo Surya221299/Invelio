@@ -34,6 +34,8 @@ enum APIEndpoint {
     case addWatchlist(kode: String)
     /// Hapus saham dari watchlist
     case removeWatchlist(kode: String)
+    /// Status watchlist suatu saham
+    case watchlistStatus(kode: String)
     /// Perkiraan jadwal rilis laporan keuangan (earnings) per emiten
     case earnings(symbol: String)
     /// Rally streak (hari hijau berturut-turut) per emiten
@@ -94,6 +96,7 @@ enum APIEndpoint {
             return path
         case .addWatchlist(let kode):          return "/api/saham/\(kode)/watchlist"
         case .removeWatchlist(let kode):       return "/api/saham/\(kode)/watchlist"
+        case .watchlistStatus(let kode):       return "/api/saham/\(kode)/watchlist"
         case .earnings(let s):                 return "/saham/\(s)/earnings"
         case .rallyStreak(let s):              return "/saham/\(s)/rally-streak"
         case .analystRatings(let s, let market):

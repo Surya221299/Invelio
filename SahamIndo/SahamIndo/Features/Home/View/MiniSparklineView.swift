@@ -171,34 +171,46 @@ struct MiniSparklineView: View {
 
                 let startY = yFor(startVal)
 
+                let pts: [CGPoint] = (0..<closes.count).map { i in
+                    CGPoint(x: xFor(i), y: yFor(closes[i]))
+                }
+                let tension: CGFloat = 0.33
+
                 func buildArea(closeY: CGFloat) -> Path {
                     var p = Path()
-                    p.move(to: CGPoint(x: xFor(0), y: closeY))
-                    for i in 0..<closes.count {
-                        let x = xFor(i); let y = yFor(closes[i])
-                        if i == 0 { p.addLine(to: CGPoint(x: x, y: y)) }
-                        else {
-                            let px = xFor(i - 1); let py = yFor(closes[i - 1])
-                            p.addCurve(to: CGPoint(x: x, y: y),
-                                       control1: CGPoint(x: px + (x-px)*0.5, y: py),
-                                       control2: CGPoint(x: px + (x-px)*0.5, y: y))
-                        }
+                    guard !pts.isEmpty else { return p }
+                    p.move(to: CGPoint(x: pts[0].x, y: closeY))
+                    p.addLine(to: pts[0])
+                    for i in 1..<pts.count {
+                        let p0 = pts[max(i - 2, 0)]
+                        let p1 = pts[i - 1]
+                        let p2 = pts[i]
+                        let p3 = pts[min(i + 1, pts.count - 1)]
+                        let cp1 = CGPoint(x: p1.x + (p2.x - p0.x) * tension,
+                                          y: p1.y + (p2.y - p0.y) * tension)
+                        let cp2 = CGPoint(x: p2.x - (p3.x - p1.x) * tension,
+                                          y: p2.y - (p3.y - p1.y) * tension)
+                        p.addCurve(to: p2, control1: cp1, control2: cp2)
                     }
-                    p.addLine(to: CGPoint(x: xFor(closes.count - 1), y: closeY))
-                    p.closeSubpath(); return p
+                    p.addLine(to: CGPoint(x: pts.last!.x, y: closeY))
+                    p.closeSubpath()
+                    return p
                 }
 
                 func buildLine() -> Path {
                     var p = Path()
-                    for i in 0..<closes.count {
-                        let x = xFor(i); let y = yFor(closes[i])
-                        if i == 0 { p.move(to: CGPoint(x: x, y: y)) }
-                        else {
-                            let px = xFor(i-1); let py = yFor(closes[i-1])
-                            p.addCurve(to: CGPoint(x: x, y: y),
-                                       control1: CGPoint(x: px+(x-px)*0.5, y: py),
-                                       control2: CGPoint(x: px+(x-px)*0.5, y: y))
-                        }
+                    guard !pts.isEmpty else { return p }
+                    p.move(to: pts[0])
+                    for i in 1..<pts.count {
+                        let p0 = pts[max(i - 2, 0)]
+                        let p1 = pts[i - 1]
+                        let p2 = pts[i]
+                        let p3 = pts[min(i + 1, pts.count - 1)]
+                        let cp1 = CGPoint(x: p1.x + (p2.x - p0.x) * tension,
+                                          y: p1.y + (p2.y - p0.y) * tension)
+                        let cp2 = CGPoint(x: p2.x - (p3.x - p1.x) * tension,
+                                          y: p2.y - (p3.y - p1.y) * tension)
+                        p.addCurve(to: p2, control1: cp1, control2: cp2)
                     }
                     return p
                 }

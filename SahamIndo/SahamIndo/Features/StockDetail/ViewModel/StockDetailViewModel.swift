@@ -39,6 +39,10 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
     @Published private(set) var fundamentals: CompanyFundamentals?
     @Published private(set) var moat: MoatInsight?
 
+    // MARK: - Watchlist State
+    @Published private(set) var isWatchlist:          Bool = false
+    @Published private(set) var isTogglingWatchlist:  Bool = false
+
     let item: PortfolioItem
 
     // MARK: - Computed price properties
@@ -69,16 +73,19 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
 
     private let fetchChartUseCase: FetchChartDataUseCase
     private let detailRepository:  StockDetailRepositoryProtocol
+    private let searchRepository:  SearchRepositoryProtocol
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Init
 
     init(item: PortfolioItem,
          fetchChartUseCase: FetchChartDataUseCase,
-         detailRepository:  StockDetailRepositoryProtocol) {
+         detailRepository:  StockDetailRepositoryProtocol,
+         searchRepository:  SearchRepositoryProtocol = DIContainer.shared.searchRepository) {
         self.item              = item
         self.fetchChartUseCase = fetchChartUseCase
         self.detailRepository  = detailRepository
+        self.searchRepository  = searchRepository
 
         // Forward perubahan dari LivePriceStore (nested ObservableObject) ke
         // objectWillChange milik ViewModel ini. Tanpa ini, update harga
@@ -192,6 +199,31 @@ final class StockDetailViewModel: ObservableObject, ChartViewModelProtocol {
         moat = try? await detailRepository.fetchMoat(
             symbol: item.symbol, market: item.market
         )
+    }
+
+    // MARK: - Watchlist Toggle
+
+    func fetchWatchlistStatus() async {
+        if let status = try? await searchRepository.getWatchlistStatus(kode: item.symbol) {
+            isWatchlist = status
+        }
+    }
+
+    func toggleWatchlist() async {
+        guard !isTogglingWatchlist else { return }
+        isTogglingWatchlist = true
+        let nextState = !isWatchlist
+        isWatchlist = nextState
+        do {
+            if nextState {
+                _ = try await searchRepository.addToWatchlist(kode: item.symbol)
+            } else {
+                _ = try await searchRepository.removeFromWatchlist(kode: item.symbol)
+            }
+        } catch {
+            isWatchlist = !nextState
+        }
+        isTogglingWatchlist = false
     }
 
     func oneDaySlotIndex(for date: Date) -> Int {

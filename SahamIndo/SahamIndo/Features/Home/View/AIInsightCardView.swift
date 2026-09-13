@@ -118,7 +118,7 @@ struct AIInsightCardView: View {
             Circle().fill(accent).frame(width: 7, height: 7)
                 .scaleEffect(isPulsing ? 0.7 : 1.0)
                 .animation(.easeInOut(duration: 1).repeatForever(), value: isPulsing)
-            Text("AI LIVE")
+            Text("AI Insight")
                 .font(Font.caption2)
                 .foregroundColor(accent).kerning(0.8)
         }

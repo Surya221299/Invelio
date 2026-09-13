@@ -120,18 +120,7 @@ struct SearchView: View {
 
     private var resultsList: some View {
         List(vm.results) { result in
-            SearchResultRow(
-                result:      result,
-                isAnalyzing: vm.analyzingKode == result.kode,
-                anyAnalyzing: vm.analyzingKode != nil
-            ) {
-                Task { await vm.analyze(kode: result.kode, market: result.market, nama: result.nama) }
-            } onToggleWatchlist: {
-                Task {
-                    if result.isWatchlist { await vm.removeFromWatchlist(kode: result.kode) }
-                    else                  { await vm.addToWatchlist(kode: result.kode) }
-                }
-            } onOpenDetail: {
+            SearchResultRow(result: result) {
                 router.push(.stockDetail(portfolioItem(from: result)))
             }
             .listRowBackground(Color.DarkPurpleAppBackground)
@@ -162,78 +151,44 @@ struct SearchView: View {
 // MARK: - SearchResultRow
 
 private struct SearchResultRow: View {
-    let result:         SymbolSearchResult
-    let isAnalyzing:    Bool
-    let anyAnalyzing:   Bool
-    let onAnalyze:      () -> Void
-    let onToggleWatchlist: () -> Void
-    let onOpenDetail:   () -> Void
+    let result:       SymbolSearchResult
+    let onOpenDetail: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            // Market badge + Symbol + name — tap untuk buka StockDetailView
-            HStack(spacing: 12) {
-                MarketBadge(market: result.market)
+            MarketBadge(market: result.market)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(result.kode)
-                            .font(.system(.subheadline, design: .monospaced, weight: .bold))
-                            .foregroundColor(.primary)
-                        if result.tipe == "ETF" {
-                            Text("ETF")
-                                .font(.caption2).fontWeight(.semibold)
-                                .padding(.horizontal, 5).padding(.vertical, 2)
-                                .background(Color.purple.opacity(0.25))
-                                .foregroundColor(.purple)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        }
-                    }
-                    Text(result.nama)
-                        .font(.caption).foregroundColor(.secondary)
-                        .lineLimit(1)
-                    if let exchange = result.exchange {
-                        Text(exchange).font(.caption2).foregroundColor(.primary)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(result.kode)
+                        .font(.system(.subheadline, design: .monospaced, weight: .bold))
+                        .foregroundColor(.primary)
+                    if result.tipe == "ETF" {
+                        Text("ETF")
+                            .font(.caption2).fontWeight(.semibold)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(Color.purple.opacity(0.25))
+                            .foregroundColor(.purple)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                 }
-
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onOpenDetail)
-
-            // Watchlist star
-            Button(action: onToggleWatchlist) {
-                Image(systemName: result.isWatchlist ? "star.fill" : "star")
-                    .foregroundColor(result.isWatchlist ? Color.PrimaryYellow : .secondary)
-                    .font(.title3)
-            }
-            .buttonStyle(.plain)
-
-            // Analyze button
-            Button(action: onAnalyze) {
-                if isAnalyzing {
-                    ProgressView()
-                        .tint(Color.PrimaryYellow)
-                        .frame(width: 60, height: 32)
-                } else {
-                    Text("Analyze")
-                        .font(.caption).fontWeight(.semibold)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(
-                            anyAnalyzing
-                                ? Color(.systemGray4)
-                                : Color.PrimaryYellow
-                        )
-                        .foregroundColor(anyAnalyzing ? .secondary : .black)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                Text(result.nama)
+                    .font(.caption).foregroundColor(.secondary)
+                    .lineLimit(1)
+                if let exchange = result.exchange {
+                    Text(exchange).font(.caption2).foregroundColor(.primary)
                 }
             }
-            .buttonStyle(.plain)
-            .disabled(anyAnalyzing)
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.secondary.opacity(0.5))
         }
         .padding(.vertical, 6)
         .contentShape(Rectangle())
+        .onTapGesture(perform: onOpenDetail)
     }
 }
 

@@ -110,21 +110,27 @@ struct PortfolioHistoryChart: View {
             padV + usableH * CGFloat(1 - (v - minVal) / range)
         }
 
+        let pts: [CGPoint] = (0..<values.count).map { i in
+            CGPoint(x: xFor(i), y: yFor(values[i]))
+        }
+        let tension: CGFloat = 0.33
+
         // --- Area fill (gradient) ---
         var area = Path()
-        area.move(to: CGPoint(x: xFor(0), y: h))
-        area.addLine(to: CGPoint(x: xFor(0), y: yFor(values[0])))
-        for i in 1..<values.count {
-            let px = xFor(i - 1); let py = yFor(values[i - 1])
-            let cx = xFor(i);     let cy = yFor(values[i])
-            let cpX = px + (cx - px) * 0.5
-            area.addCurve(
-                to:       CGPoint(x: cx, y: cy),
-                control1: CGPoint(x: cpX, y: py),
-                control2: CGPoint(x: cpX, y: cy)
-            )
+        area.move(to: CGPoint(x: pts[0].x, y: h))
+        area.addLine(to: pts[0])
+        for i in 1..<pts.count {
+            let p0 = pts[max(i - 2, 0)]
+            let p1 = pts[i - 1]
+            let p2 = pts[i]
+            let p3 = pts[min(i + 1, pts.count - 1)]
+            let cp1 = CGPoint(x: p1.x + (p2.x - p0.x) * tension,
+                              y: p1.y + (p2.y - p0.y) * tension)
+            let cp2 = CGPoint(x: p2.x - (p3.x - p1.x) * tension,
+                              y: p2.y - (p3.y - p1.y) * tension)
+            area.addCurve(to: p2, control1: cp1, control2: cp2)
         }
-        area.addLine(to: CGPoint(x: xFor(values.count - 1), y: h))
+        area.addLine(to: CGPoint(x: pts.last!.x, y: h))
         area.closeSubpath()
 
         ctx.fill(area, with: .linearGradient(
@@ -138,16 +144,17 @@ struct PortfolioHistoryChart: View {
 
         // --- Line ---
         var line = Path()
-        line.move(to: CGPoint(x: xFor(0), y: yFor(values[0])))
-        for i in 1..<values.count {
-            let px = xFor(i - 1); let py = yFor(values[i - 1])
-            let cx = xFor(i);     let cy = yFor(values[i])
-            let cpX = px + (cx - px) * 0.5
-            line.addCurve(
-                to:       CGPoint(x: cx, y: cy),
-                control1: CGPoint(x: cpX, y: py),
-                control2: CGPoint(x: cpX, y: cy)
-            )
+        line.move(to: pts[0])
+        for i in 1..<pts.count {
+            let p0 = pts[max(i - 2, 0)]
+            let p1 = pts[i - 1]
+            let p2 = pts[i]
+            let p3 = pts[min(i + 1, pts.count - 1)]
+            let cp1 = CGPoint(x: p1.x + (p2.x - p0.x) * tension,
+                              y: p1.y + (p2.y - p0.y) * tension)
+            let cp2 = CGPoint(x: p2.x - (p3.x - p1.x) * tension,
+                              y: p2.y - (p3.y - p1.y) * tension)
+            line.addCurve(to: p2, control1: cp1, control2: cp2)
         }
         ctx.stroke(line, with: .color(lineColor),
                    style: StrokeStyle(lineWidth: 0.6, lineCap: .round, lineJoin: .round))

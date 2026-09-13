@@ -67,7 +67,8 @@ final class DIContainer {
         StockDetailViewModel(
             item:              item,
             fetchChartUseCase: makeFetchChartDataUseCase(),
-            detailRepository:  detailRepository
+            detailRepository:  detailRepository,
+            searchRepository:  searchRepository
         )
     }
 
