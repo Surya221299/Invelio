@@ -212,35 +212,45 @@ struct PortfolioChartSectionView: View {
         .init(color: Color.PortfolioOrange.opacity(0.0),  location: 0.88)
     ]
 
+    private var isEmptyPortfolio: Bool {
+        let activeItems = items.filter { $0.quantity > 0 }
+        let currentTotal = activeItems.reduce(0) { $0 + $1.value }
+        return currentTotal == 0
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ChartCanvasView(
-                chartVM:                  chartVM,
-                selectedPoint:            $selectedPoint,
-                isDragging:               $isDragging,
-                chartSize:                $chartSize,
-                accentColor:              orange,
-                displayIsPositive:        true,
-                fixedColor:               orange,
-                revealOnFirstLoad:        true,
-                useHighPriorityDrag:      true,
-                showAreaGradient:         true,
-                lineWidth:                1.0,
-                containerBackgroundColor: .clear,
-                customAreaGradientStops:  areaGradientStops
-            )
-            .frame(height: 135)
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onAppear { chartSize = geo.size }
-                        .onChange(of: geo.size) { _, s in chartSize = s }
-                }
-            )
+            if isEmptyPortfolio {
+                emptyFlatLineChart
+            } else {
+                ChartCanvasView(
+                    chartVM:                  chartVM,
+                    selectedPoint:            $selectedPoint,
+                    isDragging:               $isDragging,
+                    chartSize:                $chartSize,
+                    accentColor:              orange,
+                    displayIsPositive:        true,
+                    fixedColor:               orange,
+                    revealOnFirstLoad:        true,
+                    useHighPriorityDrag:      true,
+                    showAreaGradient:         true,
+                    lineWidth:                1.0,
+                    containerBackgroundColor: .clear,
+                    customAreaGradientStops:  areaGradientStops
+                )
+                .frame(height: 135)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear { chartSize = geo.size }
+                            .onChange(of: geo.size) { _, s in chartSize = s }
+                    }
+                )
 
-            if !chartVM.dataPoints.isEmpty {
-                XAxisAnimatedLabels(chartVM: chartVM, chartSize: chartSize)
-                    .padding(.top, -10)
+                if !chartVM.dataPoints.isEmpty {
+                    XAxisAnimatedLabels(chartVM: chartVM, chartSize: chartSize)
+                        .padding(.top, -10)
+                }
             }
 
             PortfolioTimeRangeSelectorView(chartVM: chartVM, holdings: holdings, onRangeChange: {
@@ -248,6 +258,7 @@ struct PortfolioChartSectionView: View {
                 isDragging    = false
             }, tintColor: orange)
         }
+        .animation(.easeInOut(duration: 0.3), value: isEmptyPortfolio)
         .task { chartVM.update(items: items, holdings: holdings) }
         .onChange(of: items)    { _, newItems    in chartVM.update(items: newItems, holdings: holdings) }
         .onChange(of: holdings) { _, newHoldings in chartVM.update(items: items, holdings: newHoldings) }
@@ -255,6 +266,46 @@ struct PortfolioChartSectionView: View {
             guard newSize.width > 0, !chartVM.dataPoints.isEmpty else { return }
             Task { await chartVM.fetchChartData() }
         }
+    }
+
+    private var emptyFlatLineChart: some View {
+        GeometryReader { geo in
+            let midY = geo.size.height / 2
+            ZStack(alignment: .leading) {
+                // Area gradient di bawah garis datar
+                Path { path in
+                    path.move(to: CGPoint(x: 0, y: midY))
+                    path.addLine(to: CGPoint(x: geo.size.width, y: midY))
+                    path.addLine(to: CGPoint(x: geo.size.width, y: geo.size.height))
+                    path.addLine(to: CGPoint(x: 0, y: geo.size.height))
+                    path.closeSubpath()
+                }
+                .fill(
+                    LinearGradient(
+                        stops: [
+                            .init(color: orange.opacity(0.20), location: 0.0),
+                            .init(color: orange.opacity(0.0),  location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                // Garis datar tepat di tengah vertikal (center vertical)
+                Path { path in
+                    path.move(to: CGPoint(x: 0, y: midY))
+                    path.addLine(to: CGPoint(x: geo.size.width, y: midY))
+                }
+                .stroke(orange, lineWidth: 1.0)
+
+                // Titik kecil di ujung kanan garis agar serasi dengan chart aktif
+                Circle()
+                    .fill(orange)
+                    .frame(width: 5, height: 5)
+                    .position(x: max(geo.size.width - 4, 0), y: midY)
+            }
+        }
+        .frame(height: 135)
     }
 }
 

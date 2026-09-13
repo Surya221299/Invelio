@@ -171,6 +171,7 @@ final class APIClient {
         // lokal (uvicorn di Mac)
         "http://localhost:8080",
         "http://127.0.0.1:8080",
+        "http://192.168.0.128:8080",
     ]
     private static let fallbackURL = "http://localhost:8080"
 

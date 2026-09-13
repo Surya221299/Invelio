@@ -80,10 +80,12 @@ struct ChatbotView: View {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     ForEach(vm.messages) { msg in
-                        MessageBubble(message: msg)
-                            .id(msg.id)
+                        if !msg.content.isEmpty {
+                            MessageBubble(message: msg)
+                                .id(msg.id)
+                        }
                     }
-                    if vm.isLoading {
+                    if vm.isLoading && (vm.messages.last?.content.isEmpty ?? true) {
                         TypingIndicator()
                     }
                 }
@@ -141,26 +143,28 @@ private struct MessageBubble: View {
     )
 
     var body: some View {
-        HStack {
-            if isUser { Spacer(minLength: 40) }
-            Text(message.content)
-                .font(Font.footnote)
-                .foregroundColor(isUser ? .SurfaceWhite : .primary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background {
-                    if isUser {
-                        userBubbleGradient
-                    } else {
-                        Color.appCardBackground
+        if !message.content.isEmpty {
+            HStack {
+                if isUser { Spacer(minLength: 40) }
+                Text(message.content)
+                    .font(Font.footnote)
+                    .foregroundColor(isUser ? .SurfaceWhite : .primary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background {
+                        if isUser {
+                            userBubbleGradient
+                        } else {
+                            Color.appCardBackground
+                        }
                     }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 16))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(isUser ? Color.white.opacity(0.15) : Color.clear, lineWidth: 1)
-                )
-            if !isUser { Spacer(minLength: 40) }
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(isUser ? Color.white.opacity(0.15) : Color.clear, lineWidth: 1)
+                    )
+                if !isUser { Spacer(minLength: 40) }
+            }
         }
     }
 }
